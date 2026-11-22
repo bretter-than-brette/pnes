@@ -6,9 +6,7 @@
 #include "main.hpp"
 
 #include "modes/level.hpp"
-#ifndef TARGET_NES
 #include "modes/pregame.hpp"
-#endif
 #include "modes/title.hpp"
 #include "modes/world.hpp"
 #include "../ui/impl/sounds.hpp"
@@ -20,20 +18,19 @@ u8 scratchpad[5];
 
 atomic u16 frameCounter = 0;
 
-// THE BOOT MODE, AND IT DIFFERS BY TARGET. On a console whose save lives on a
-// device that has to be found -- a GameCube memory card in either slot or in
-// neither, a Wii's SD card or USB disk, a Switch's SD card -- eGameModes::
-// Pregame runs first and hands over to the title itself once ::saveData means
-// something. On the NES there is nothing to find: the save is the cart, so the
-// title screen is the boot mode as it always was, and the same goes for a
-// target whose backend cannot save at all.
+// THE BOOT MODE, AND IT IS THE SAME ONE ON EVERY TARGET. ::pregame runs first
+// and hands over to the title itself once ::saveData means something, which is
+// the one thing every later mode is entitled to assume.
+//
+// IT USED TO BE THE TITLE ON NES, because the mode it boots to instead was not
+// compiled there: the save is the cart, so there was no device to find and no
+// file to create. What there still is, is a cart whose battery has never been
+// written -- so pregame's NES shape validates what came back and seeds the
+// defaults when it is garbage, which is work the title screen would otherwise
+// be doing from a save it had no way to vouch for.
 //
 // ReSharper disable once CppUseAuto
-#ifndef TARGET_NES
 atomic eGameModes gameMode = eGameModes::Pregame;
-#else
-atomic eGameModes gameMode = eGameModes::Title;
-#endif
 
 SYSMEM oam::sprite_t OAMBuffer[64] __attribute__((aligned(256)));
 
@@ -123,17 +120,20 @@ RESET {
                 world::main();
                 continue;
 
-#ifndef TARGET_NES
-            // No mmc3::CallInBlock and no bank tag: this mode does not exist on
-            // the one platform that banks. No pNMI/pIRQ either -- it drives its
-            // own frames through video::WaitForPresent and asks nothing of the
-            // vectors, so whatever the previous mode left them pointing at is
-            // not consulted.
+            // NO mmc3::CallInBlock AND NO BANK TAG, on the one platform that
+            // banks either: the NES shape of this mode is a load, a validate
+            // and two stores, small enough to sit in the resident bank beside
+            // the dispatch loop that calls it -- a bank switch around it would
+            // cost more than the body does.
+            //
+            // No pNMI/pIRQ either, on any target. The drawn flow drives its own
+            // frames through video::WaitForPresent and the NES flow draws
+            // nothing at all, so whatever the previous mode left the vectors
+            // pointing at is never consulted.
             case eGameModes::Pregame:
                 log("RESET: entering pregame::main");
                 pregame::main();
                 continue;
-#endif
 
             case eGameModes::Title:
                 log("RESET: entering title::main");

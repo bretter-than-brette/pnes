@@ -2122,10 +2122,14 @@ QStringList genGeometryStorage(const QTreeWidgetItem* item, int ntOffX, int ntOf
         childMakes << QString("    %1::Make();").arg(kid);
     }
     // Everything this node's Make() ends with: its children's own Make()s,
-    // then whatever initializer a caller's split-out storage could no longer
-    // carry for itself (`extraMakeSeeds` -- see BssSplit::decl, and
-    // genSliderDecl/genButtonDecl for the two that have one). Children first,
-    // same contract as every other Make() here.
+    // then whatever a caller needs stated there (`extraMakeSeeds`). Only
+    // genButtonDecl uses it now, for the authored ON/OFF default a button
+    // contributes to the shared ::button_state word -- an `|=` of one bit,
+    // which is a statement about what this build AUTHORED rather than about
+    // what the player last chose. genSliderDecl deliberately passes nothing:
+    // see its own note on why a Make() that wrote `amount` was erasing a
+    // loaded setting rather than defaulting an empty one. Children first, same
+    // contract as every other Make() here.
     QStringList makeTail = childMakes;
     makeTail += extraMakeSeeds;
     const QString childTail = makeTail.isEmpty() ? QString() : ("\n" + makeTail.join("\n"));
@@ -2768,19 +2772,29 @@ QString genSliderDecl(const QTreeWidgetItem* item, int ntOffX, int ntOffY, bool 
 
     const QString amountDecl =
         bss.decl(bssPrefixTok, QStringLiteral("atomic u8"), QStringLiteral("amount"), QStringLiteral("0"));
-    // A slider is the one node whose state has an initializer no Make() was
-    // already rewriting, so splitting it out means Make() has to -- and a
-    // Make() can only name a namespace member declared before it, which is
-    // why the declaration moves ahead of the geometry (Make() included) in
-    // that case alone. Nothing moves on a scene that hasn't split its BSS.
+    // MAKE() DOES NOT TOUCH `amount`, AND THAT IS THE POINT OF SPLITTING IT.
+    // Where the storage is split out it lives in the application's own RAM --
+    // a save struct, typically -- so it is the one piece of a slider whose
+    // value OUTLIVES the scene being made. Make() is run every time the page
+    // is built, so a seed there is not an initializer but an erase: it would
+    // overwrite a loaded setting with a fresh zero every time the page opened.
+    // demo/src/modes/title.cpp carries a save/restore of the whole config
+    // block around its gen::options::Make() call, and that is the scar this
+    // used to leave.
+    //
+    // SO UITK AUTHORS NO VALUE FOR A SPLIT SLIDER AT ALL. It emits the
+    // reference and stops, exactly as the note below says of range, step and
+    // clamping: whatever owns the storage owns what is in it, and a default
+    // belongs wherever that owner seeds its defaults. An UNSPLIT slider still
+    // gets its `0` the honest way, as a real initializer on a real definition
+    // that is made once (::amountDecl above).
+    //
+    // The declaration is still emitted ahead of the geometry when split, so
+    // that anything the geometry's Make() grows later can name it.
     QStringList lines;
-    QStringList amountSeed;
-    if (bss.enabled) {
-        lines << amountDecl;
-        amountSeed << QStringLiteral("    amount = 0;");
-    }
+    if (bss.enabled) lines << amountDecl;
     lines += genGeometryStorage(item, ntOffX, ntOffY, isNes, variadic, runtimePos, rootItem, target,
-                                 ntOffXExpr, ntOffYExpr, geom, amountSeed);
+                                 ntOffXExpr, ntOffYExpr, geom);
 
     // The slider's holding value -- the one piece of state uitk does own for
     // one. `atomic` (technology.hpp: volatile on NES, a true atomic

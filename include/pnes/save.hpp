@@ -160,6 +160,41 @@ namespace save {
     Response GetSaveLocation();
 
     /**
+     * @brief Removes this game's save from the medium, so there is nothing
+     *        there again.
+     *
+     * THE ONE CALL THAT DESTROYS DATA, and the only route back to ::missing
+     * once a save exists. A caller that has decided a save is unusable -- a
+     * version it cannot read, a check that will not agree -- has two honest
+     * moves: overwrite it with ::Save, or remove it with this and offer to
+     * ::CreateSave from scratch. ::CreateSave alone cannot do the second: a
+     * file already there answers ::exists rather than replacing itself.
+     *
+     * WHICH SAVE IS WHATEVER THE BACKEND LAST LOCATED, exactly as the
+     * two-argument ::Save resolves it -- a ::GetSaveLocation or a completed
+     * transfer leaves that behind. With nothing located yet, a backend that can
+     * search does (the GameCube's identity search); one that cannot answers
+     * ::missing.
+     *
+     * TICKED LIKE EVERY OTHER OPERATION HERE, so `while (!response.done)` is
+     * still the loop: a GameCube delete is a mount, a directory write and an
+     * unmount, none of them instant.
+     *
+     * AFTERWARDS THE LOCATION IS FORGOTTEN, because it names something that is
+     * no longer there. The next ::GetSaveLocation reports ::missing and a
+     * ::CreateSave succeeds where it would have answered ::exists. ::found
+     * means it is gone; ::missing means there was nothing to remove, which is
+     * the same end state and not a separate case for a caller to handle.
+     *
+     * ON A TARGET WHOSE SAVE IS ITS HARDWARE there is nothing to unlink: the
+     * NES's save IS the cart (src/nes/mappers/mmc3.cpp), so this answers
+     * ::found having removed nothing, the way every call there answers for a
+     * save that cannot be absent. A caller wanting a blank save there writes
+     * one.
+     */
+    Response Delete();
+
+    /**
      * @brief Which save devices are ACCESSIBLE right now, as a bitfield.
      *
      * Bit `n` is set when device `n` holds media this platform can save to --

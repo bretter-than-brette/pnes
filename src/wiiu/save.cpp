@@ -799,6 +799,38 @@ Response GetSaveLocation() {
 }
 
 /**
+ * @brief Removes the save, which on a filesystem is one unlink.
+ *
+ * ONE CALL AND IT IS OVER, unlike the GameCube's mount-write-unmount: the path
+ * is fixed by the build, the volume is already mounted, and `done` is true on
+ * the first turn like every other operation here.
+ *
+ * ENOENT IS save::missing AND NOT A FAILURE, which is ::MapErrno's own rule
+ * reaching its most useful case: "there is nothing there" is the END STATE this
+ * call exists to produce, so a caller that deletes a save twice gets the same
+ * answer both times and has nothing extra to handle. save.hpp says so too.
+ *
+ * NO ::freeValid TO DROP HERE, unlike the Switch's and the 3DS's: this backend
+ * does not cache a free-space answer at all (::FreeDevices is ::Inserted, for
+ * the reason the header's difference 4 gives), so the only state a delete
+ * invalidates is the remembered location -- forgotten either way, because a
+ * failed unlink says nothing reliable about what is still on the card.
+ */
+Response Delete() {
+    if (!Mount()) return { .done = true, .err = Fail(no_device), .path = nullptr };
+
+    errno = 0;
+    const int removed = unlink(kSaveFile);
+
+    haveLocation = false;
+
+    if (removed < 0) return { .done = true, .err = Fail(MapErrno(errno)), .path = nullptr };
+
+    Won();
+    return { .done = true, .err = found, .path = nullptr };
+}
+
+/**
  * @brief No counterpart on this console, and not a gap to be filled.
  *
  * These two move a `card_stat` -- a 64-byte entry in a GameCube memory card's

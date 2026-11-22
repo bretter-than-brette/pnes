@@ -28,24 +28,20 @@ enum class eGameModes : u8 {
     Title,  // title screen
     World,  // world map, level select
     Level,  // gameplay, platforming in level
-#ifndef TARGET_NES
-    // Save discovery: find, load or create the save before any mode that
-    // assumes it exists runs. The mode main.cpp BOOTS into on the GameCube, the
-    // Wii and the Switch, even though it is last in this list -- the order here
-    // is just the numbering, and appending keeps Title at 0 on every target
-    // rather than renumbering the three modes that existed before it for one
-    // platform's benefit.
+    // Gets ::saveData into a state every later mode may rely on, before any of
+    // them runs. THE BOOT MODE ON EVERY TARGET, even though it is last in this
+    // list -- the order here is just the numbering, and appending keeps Title
+    // at 0 everywhere rather than renumbering the three modes that existed
+    // before it.
     //
-    // NOT ON NES, where there is no device to find and nothing to choose
-    // between: the MMC3 backend answers every save call with ::save::found
-    // because the save IS the cart, so an NES build boots straight to the
-    // title and this mode is not compiled at all -- nor is it on a target
-    // title and this mode is not compiled at all. Every other target asks
-    // ::save::AccessibleDevices what it has and acts on the answer -- including
-    // one still linking the weak backend in src/all/save.cpp, which answers an
-    // empty mask and gets the "nowhere to save" arm the mode already has.
+    // ITS SHAPE DIFFERS AND ITS JOB DOES NOT. Where the save is a file on a
+    // device, this is a drawn mode that finds it, offers to create it, lets the
+    // player choose where it goes, and reports every way that can fail. On NES
+    // the save IS the cart, so it loads, validates and seeds the defaults with
+    // nothing on screen -- no NMI, no IRQ, no frame pump. A target on the weak
+    // backend (src/all/save.cpp) gets an empty device mask and takes the drawn
+    // flow's "nowhere to save" arm. See demo/src/modes/pregame.hpp.
     Pregame,
-#endif
 };
 
 /** @brief Viewport width in metatiles (tiles / 2). */

@@ -50,6 +50,13 @@ __attribute__((weak)) Response CreateSave(const void*, const std::size_t, const 
 // A finished search with nowhere to have looked.
 __attribute__((weak)) Response GetSaveLocation() { return { .done = true, .err = no_device }; }
 
+// Nothing to remove, because nothing could ever have been written: every call
+// here refuses before it touches anything, so there is no save to destroy and
+// no medium to destroy it on. ::no_device rather than ::missing, matching the
+// rest of this file -- the honest content is that there is nowhere, not that
+// somewhere was empty.
+__attribute__((weak)) Response Delete() { return { .done = true, .err = no_device }; }
+
 // The GameCube's directory entry has no counterpart anywhere else: these two
 // move a card_stat, which only a memory card has. A target with no card has
 // nothing to read and nothing to state.

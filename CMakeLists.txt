@@ -2341,8 +2341,15 @@ icon.png (32x32). Both are converted to CI8 and embedded in the save file.")
         # Same mechanism the music and SFX use on audio.cpp, scoped to the one
         # TU that #embeds these: --embed-dir because -I is not reliably
         # searched for #embed, and OBJECT_DEPENDS so re-exported art recompiles
-        # pregame.cpp instead of leaving last build's picture in the .dol.
-        set_source_files_properties(${CMAKE_SOURCE_DIR}/demo/src/modes/pregame.cpp
+        # that TU instead of leaving last build's picture in the .dol.
+        #
+        # THE TU IS demo/src/save.cpp, not pregame.cpp. The banner and icon sit
+        # beside ::PopulateSaveData, which is the only thing that reads them --
+        # they were in the pregame mode while that mode was their only caller,
+        # which had a mode owning the bytes that describe the save rather than
+        # the save owning them. This property has to name whichever file holds
+        # the #embeds, so it moved with them.
+        set_source_files_properties(${CMAKE_SOURCE_DIR}/demo/src/save.cpp
                 PROPERTIES
                     OBJECT_DEPENDS  "${OGC_CARD_OUTPUTS}"
                     INCLUDE_DIRECTORIES "${OGC_ASSET_DIR}"

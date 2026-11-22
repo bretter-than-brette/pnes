@@ -2,18 +2,48 @@
 
 #include <pnes/save.hpp>
 
-// NOT ON NES, AND THAT IS THE WHOLE OF THE CONDITION. The save there IS the
-// cart (src/nes/mappers/mmc3.cpp), so there is no file to find and no device
-// to pick, and the mode would need a bank of its own besides (main.cpp's note
-// on ::mmc3::CallInBlock). Every other target asks ::save::AccessibleDevices
-// what it has and acts on the answer, so none of them needs telling here.
+namespace pregame {
+    /**
+     * @brief Gets ::saveData into a state every later mode may rely on, then
+     *        hands over to the title.
+     *
+     * THE FIRST MODE ON EVERY TARGET (main.cpp's ::gameMode starts here),
+     * because every other mode is entitled to assume ::saveData means
+     * something. It sets ::gameMode to eGameModes::Title on its way out, so
+     * main.cpp's dispatch loop goes straight on to the title screen.
+     *
+     * TWO SHAPES, AND THE DIFFERENCE IS THE MEDIUM RATHER THAN THE JOB. Both
+     * end with a ::saveData that is either the player's or a freshly defaulted
+     * one, and neither returns until that is true.
+     *
+     *   - WHERE THE SAVE IS A FILE ON A DEVICE, the device may be missing, the
+     *     file may not exist, the player may have to choose where it goes and
+     *     be asked whether to spend the space -- so this draws a screen, pumps
+     *     its own frames, and reports every way any of that can fail.
+     *
+     *   - ON NES THE SAVE IS THE CART, so there is nothing to find, nothing to
+     *     choose and nothing that can go wrong at the device level: the load
+     *     cannot fail, and the only question left is whether what came back is
+     *     MEANINGFUL. So that path loads, validates, and populates the
+     *     defaults if validation says no. It draws nothing, owns no NMI or IRQ
+     *     vector, pumps no frames and blocks on nothing -- a battery cart
+     *     reads as garbage once, on the very first boot, and every boot after
+     *     that is a validate and a return. See its definition in pregame.cpp.
+     */
+    void main();
+}
+
+// EVERYTHING BELOW IS THE SCREEN, AND THE NES HAS NO SCREEN HERE. The wording,
+// the wheels, the option vocabulary and the write-back entry point all belong
+// to the drawn flow; ::main's NES shape loads, validates, defaults and returns
+// without any of it. ::pregame::main itself is declared above, on every target.
 #ifndef TARGET_NES
 
 constexpr auto retryText        = ::charmap_generic.encode("RETRY");
 constexpr auto continueText     = ::charmap_generic.encode("CONTINUE");
 constexpr auto yesText          = ::charmap_generic.encode("YES");
 constexpr auto noText           = ::charmap_generic.encode("NO");
-constexpr auto eraseText        = ::charmap_generic.encode("ERASE ALL");
+constexpr auto eraseText        = ::charmap_generic.encode("ERASE");
 // THE TWO DEVICE LABELS, AND THE ONLY PART OF THIS WHEEL THAT IS PER CONSOLE.
 // ::Card1 / ::Card2 are device indices 0 and 1 (demo/src/save.hpp), and what
 // sits at those indices is what changes: slots A and B on the GameCube, the
@@ -60,29 +90,6 @@ constexpr auto card2Text        = ::charmap_generic.encode("USB DRIVE");
 // user rtTextBoxes to draw this text, its GC so its compute is OK
 
 namespace pregame {
-    /**
-     * @brief Finds, loads or creates the save, then hands over to the title.
-     *
-     * The FIRST mode off the NES (main.cpp's ::gameMode starts here), because
-     * every other mode is entitled to assume ::saveData means something. It
-     * sets ::gameMode to eGameModes::Title on its way out, so main.cpp's
-     * dispatch loop goes straight on to the title screen.
-     *
-     * NOT PRESENT ON NES. A battery cart has no device to find, nothing to
-     * choose between and no metadata to lay out -- the MMC3 backend answers
-     * every save call with ::save::found and the save simply IS the cart -- so
-     * an NES build boots to the title directly and none of this is compiled.
-     * The Wii runs all of it: it has two devices that may each be absent, which
-     * is the situation this mode exists for. So does the Switch, with one
-     * device that may be absent -- which is the same situation minus the
-     * choice, and the flow handles it by never drawing the wheel. The 3DS is
-     * that case again, and the one where "may be absent" is literal: its card
-     * can leave the slot mid-game (src/3ds/save.cpp). The Wii U is the Switch's
-     * case once more -- one device, no choice -- with a card that can also
-     * leave mid-game, noticed when the mount goes rather than when the card
-     * does (src/wiiu/save.cpp).
-     */
-    void main();
 
     /**
      * @brief Writes ::saveData, shows SAVING while it goes where that is worth
@@ -102,12 +109,6 @@ namespace pregame {
      */
     bool SaveScreen();
 
-#ifdef TARGET_GC
-    extern const OGC_BANNER_CI(banner);
-    extern const OGC_ICON_CI(icon);
-    extern const char gameName[32];
-    extern const char gameDesc[32];
-#endif
 }
 
 #endif // TARGET_NES

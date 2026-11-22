@@ -2,6 +2,9 @@
 #include "../save.hpp"
 #include <pnes/save.hpp>
 
+// NOT AVAILABLE ON NES (llvm-mos is freestanding here). Nothing in this file
+// needs it any more -- ::PopulateSaveData and the config defaults moved to
+// demo/src/save.cpp -- but the drawn flow below still does.
 #ifndef TARGET_NES
 #include <cstring>
 #endif
@@ -25,6 +28,51 @@
 #include "../../ui/impl/buttons.hpp"
 using namespace br0::intsh;
 
+namespace pregame {
+
+#ifdef TARGET_NES
+/**
+ * @brief The NES's whole save flow: load it, check it, default it if it is bad.
+ *
+ * NO SCREEN, NO VECTORS, NO FRAMES. This draws nothing, installs no NMI or IRQ
+ * handler and never pumps a frame, which is what lets it run before any mode
+ * has set a scene up -- and why main.cpp dispatches it without the
+ * ::mmc3::CallInBlock the drawn modes need. The drawn flow exists because a
+ * device can be missing and a file can be absent; neither is reachable here.
+ *
+ * THE LOAD CANNOT FAIL, so nothing branches on its error. The save IS the cart
+ * (src/nes/mappers/mmc3.cpp): every call there answers `done` true and
+ * save::found on its first turn, so the loop below runs exactly once and folds
+ * away -- those backends are ::AI, so at -O2 there is no call left at all. With
+ * SAVE_FILE unset it is the weak backend answering instead (src/all/save.cpp),
+ * which reports no_device and leaves ::saveData alone. Both end in the same
+ * place, because what matters is not what the medium said but whether what came
+ * back MEANS anything.
+ *
+ * WHICH IS ::ValidateSave'S QUESTION, and the only one this path asks. A fresh
+ * battery reads as garbage and a cart written by an older build reads as the
+ * wrong version; both are "there is no save here yet", so the defaults go in
+ * and the next boot validates clean. The player is told none of it -- there is
+ * nothing for them to decide and nothing they could have done differently.
+ */
+void main() {
+    save::Response response = { };
+    // NO WaitBody() IN THIS LOOP, unlike the drawn flow's: there is no scene to
+    // keep alive and no audio to tick, and the condition is false on the first
+    // turn regardless. Written as a loop rather than a bare call so it stays
+    // correct if this target ever gains a backend needing more than one turn.
+    while (response = save::Load(&saveData, sizeof(saveData)), !response.done) { }
+
+    if (!ValidateSave()) {
+        PopulateSaveData();
+    }
+
+    gameMode = eGameModes::Title;
+}
+#endif
+
+} // namespace pregame
+
 #ifndef TARGET_NES
 
 namespace pregame {
@@ -45,8 +93,6 @@ static bool LoadSave();
 static bool TryCreateSave();
 static void PrintContext(const u8* infoText);
 static eOptions ChoiceWheel(const eOptions* pOptions, u8 sOptions);
-static void PopulateSaveData();
-static void SeedConfigDefaults();
 static void MakeScene();
 static void ApplyLoadedConfig();
 static void InitPregameScreen();
@@ -86,7 +132,6 @@ void main() {
     InitPregameScreen();
 
     PopulateSaveData();
-    SeedConfigDefaults();
     save::Response response = { };
 
     retry:
@@ -103,7 +148,11 @@ void main() {
                 savePath = new char[sPath + 1];   // + the terminator strcpy writes
                 strcpy(savePath, response.path);
             }
-            LoadSave();  // proceed to attempt to load
+            // THE ANSWER IS ACTED ON, which it was not before: false means
+            // the player asked for the whole flow to be run again (a failed
+            // erase, so far), and dropping it on the floor is what made ERASE
+            // look like "continue to the game".
+            if (!LoadSave()) goto retry;
             break;
         }
         case save::missing:
@@ -575,22 +624,48 @@ bool LoadSave() {
 
     if (!ValidateSave()) {
         PrintContext(saveCorruptText.data());
-        // print information about the save file being corrupted, handle this
 
-        switch (ChoiceWheel(eraseOpts, sizeof(eraseOpts))) {
-            case Erase:
-                return false; // re attempt
+        // ERASE REMOVES THE FILE AND THEN STARTS THE FLOW AGAIN, which is the
+        // whole point of returning false: ::main's `goto retry` runs
+        // ::save::GetSaveLocation afresh, and with the save gone that now
+        // answers save::missing -- the branch that offers to CREATE one. So the
+        // player who said ERASE is asked whether to make a new save, instead of
+        // being dropped into the game on a card they just cleared.
+        //
+        // IT USED TO `return false` WITHOUT DELETING ANYTHING, and ::main
+        // DISCARDED the value: `LoadSave();` with no `if`. So ERASE wrote
+        // nothing, removed nothing, said nothing, and went straight to the
+        // title with the corrupt file still on the card. Both halves of that
+        // are fixed -- the delete here, and the caller actually reading this.
+        if (ChoiceWheel(eraseOpts, sizeof(eraseOpts)) == Erase) {
+            save::Response removed { };
+            while (removed = save::Delete(), !removed.done) {
+                WaitBody();
+            }
 
-            case Continue:
-                break;
+            log("pregame: erase -> err=%d", removed.err);
 
-            default:
-                log("unknown choice selected");
+            // save::missing IS A SUCCESS HERE, exactly as save.hpp says: it
+            // means there was nothing to remove, which is the state this was
+            // asked to reach. Either way the save is gone and the retry finds
+            // nothing, so both land on the create prompt.
+            if (removed.err == save::found || removed.err == save::missing) return false;
+
+            // The card refused. Reported the way every other failure in this
+            // mode is, with the same two answers: try the whole flow again, or
+            // carry on without a save -- on the defaults already in RAM, since
+            // the malformed file is still out there and unreadable.
+            PrintContext(SaveErrorText(removed.err));
+            if (ChoiceWheel(errorOpts, sizeof(errorOpts)) == Retry) return false;
+            PopulateSaveData();
+            return true;
         }
 
-
+        // CONTINUE leaves the malformed file exactly where it is and plays on
+        // the defaults in RAM, which is the point of offering it: a player who
+        // would rather keep a chance of recovering that card elsewhere than
+        // have this game overwrite it.
         PopulateSaveData();
-        SeedConfigDefaults();
         return true;
     }
 
@@ -824,40 +899,6 @@ bool TryCreateSave() {
     return true;    //for no retry
     // using this information, we can present what memory cards are accessible, should work on something here nicely
 }
-
-void SeedConfigDefaults() {
-    memset(&saveData.config, 0, sizeof(saveData.config));
-    gen::options::audioCanvas::musicSlider::amount = 0xFF;
-    gen::options::audioCanvas::SFXSlider::amount   = 0xFF;
-}
-
-void PopulateSaveData() {
-    saveData.version = saveVersion;
-#ifdef TARGET_GC
-    memcpy(saveData.header.banner,      banner,     sizeof(banner));
-    memcpy(saveData.header.icon,        icon,       sizeof(icon));
-    memcpy(saveData.header.gameName,    gameName,   sizeof(gameName));
-    memcpy(saveData.header.gameDesc,    gameDesc,   sizeof(gameDesc));
-#endif
-}
-
-#ifdef TARGET_GC
-const OGC_BANNER_CI(banner) = {
-#embed <card/banner.ci>
-};
-
-const OGC_ICON_CI(icon) = {
-#embed <card/icon.ci>
-};
-
-#ifdef REGION_JP
-const char gameName[32] = "\x00";   // shift-JIS todo: the japanese are hungry for letters
-const char gameDesc[32] = "\x00";   // shift-JIS
-#else
-const char gameName[32] = "Super Mary Sisters\x00";   // ASCII
-const char gameDesc[32] = "It has Mary in it.\x00";   // ASCII
-#endif
-#endif
 
 } // namespace pregame
 

@@ -4,7 +4,7 @@
 
 #include "banks.hpp"
 
-constexpr u16 saveVersion = 0;
+constexpr u16 saveVersion = 1;
 
 
 enum eOptions : u8 {
@@ -209,9 +209,13 @@ constexpr void UpdateTextForSave(const char* buff, void* target, std::size_t sNa
 constexpr void UpdateGameNameForSave(const char* buff, std::size_t sName);
 constexpr void UpdateGameDescriptionForSave(const char* buff,  std::size_t sName);
 
+#if defined(TARGET_NES) || defined(TARGET_GBA) || defined(TARGET_NDS)
+constexpr u8 templateMagicWord[16] = "SUPER_MARY_GAME";
+#endif
+
 inline bool ValidateSave() {
 #if defined(TARGET_NES) || defined(TARGET_GBA) || defined(TARGET_NDS)
-    constexpr u8 templateMagicWord[16] = "SUPER_MARY_GAME";
+    if (saveVersion != saveData.version) return false;
     u8 fails = 0;
     for (u8 i = 0; i < 16; i++) {
         if (saveData.magicWord[i] != templateMagicWord[i]) fails++;
@@ -226,3 +230,21 @@ inline bool ValidateSave() {
     if (saveData.version != saveVersion) return false;
     return true;
 }
+
+/**
+ * @brief Makes ::saveData a save this build would accept: its version, its
+ *        identity, the metadata the medium shows, and the options page's
+ *        authored defaults.
+ *
+ * EVERYTHING ::ValidateSave LOOKS FOR, AND EVERYTHING A FRESH PAGE NEEDS, in
+ * one call -- because every caller wanted both and there was never a reason to
+ * ask for them separately. It is what "there is no save here yet" resolves to:
+ * run it and what comes back validates clean on the next boot.
+ *
+ * NOT INLINE, AND THAT IS FORCED. The options page's own defaults live in
+ * uitk's generated accessors, and that header declares references INTO
+ * ::saveData -- so it can only be included after this one, which means the body
+ * has to be in save.cpp where that include can follow. The GameCube's banner
+ * and icon are there with it, as the `#embed`s that own them.
+ */
+void PopulateSaveData();

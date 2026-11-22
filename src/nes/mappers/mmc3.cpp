@@ -192,6 +192,20 @@ namespace save {
     AI Response GetMetaData (void* const) { return { .done = true, .err = found }; }
     AI Response SetMetaData (const void* const) { return { .done = true, .err = found }; }
                                                                                     // but not to be used
+
+    // THERE IS NOTHING TO REMOVE AND THAT IS NOT A FAILURE. The save IS the
+    // cart: the WRAM this mapper maps at $6000 is the save file, so there is no
+    // directory entry to unlink and no way for the save to stop existing while
+    // the cart is in the slot. save::found, like every call above, because the
+    // state this asks for -- "nothing of mine is on the medium" -- is one this
+    // medium cannot be in, and reporting save::no_device would be a lie about
+    // hardware that is plainly present.
+    //
+    // A GAME THAT WANTS A BLANK SAVE HERE WRITES ONE, which is what the demo
+    // does: ::pregame::main validates what the battery held and calls
+    // ::PopulateSaveData when it does not like the answer (demo/src/save.cpp).
+    // save.hpp says the same thing in the portable words.
+    AI Response Delete() { return { .done = true, .err = found }; }
 }
 
 #endif

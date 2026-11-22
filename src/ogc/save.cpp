@@ -255,7 +255,7 @@ void* metaOut = nullptr;
 alignas(32) u8 workarea[CARD_WORKAREA_SIZE];
 
 /** @brief What the in-flight sequence is doing, if anything. */
-enum class Op : u8 { None, Saving, Loading, Creating, Finding, GettingMeta, SettingMeta, Surveying };
+enum class Op : u8 { None, Saving, Loading, Creating, Deleting, Finding, GettingMeta, SettingMeta, Surveying };
 
 /**
  * @brief True for the two operations that move a card_stat, not file bytes.
@@ -970,7 +970,10 @@ bool AdvanceSlot() {
 bool Begin(Op want, const u8* src, u8* tar, std::size_t size, const char* path) {
     // `path` here is already unwrapped from the caller's save::Response by the
     // entry points below -- only its `path` field is consumed. See ::PathOf.
-    if (want != Op::Finding && !IsMeta(want)) {
+    // ::Deleting JOINS ::Finding AND THE METADATA OPS HERE: it moves no file
+    // bytes and is passed no size, so `size == 0` is its ordinary case rather
+    // than a caller's mistake.
+    if (want != Op::Finding && want != Op::Deleting && !IsMeta(want)) {
         // The widest sector this file is built for. The real limit is the
         // CARD'S sector, which is not known until ::ProbeCurrentSlot has
         // asked -- this is the cheap bound that can be applied before the card
@@ -1059,6 +1062,25 @@ s32 Resolve() {
         if (err != CARD_ERROR_READY) return err;   // incl. CARD_ERROR_EXIST
         opened = true;
         return CARD_ERROR_READY;
+    }
+
+    if (op == Op::Deleting) {
+        // NOTHING IS OPENED, which is why this is the only resolve that leaves
+        // ::opened false: CARD_Delete addresses the entry by NAME and removes
+        // the directory entry itself, so a CARD_Open first would leave a handle
+        // to a file that no longer exists for ::Tick's Finish to close.
+        //
+        // The name may still have to be found, exactly as a save or a load with
+        // nothing naming the file has to find it -- a caller can ask for a
+        // delete having never located anything.
+        if (targetName[0] == '\0') {
+            card_dir dir;
+            const s32 found = CARD_FindFirst(chn, &dir, false);
+            if (found != CARD_ERROR_READY) return found;   // incl. CARD_ERROR_NOFILE
+            std::memcpy(targetName, dir.filename, CARD_FILENAMELEN - 1);
+            targetName[CARD_FILENAMELEN - 1] = '\0';
+        }
+        return CARD_Delete(chn, targetName);
     }
 
     // Saving or loading with nothing naming the file yet -- no path, and
@@ -1159,6 +1181,23 @@ bool Tick(Op want, const u8* src, u8* tar, std::size_t size, const char* path) {
             if (op == Op::Finding) {
                 RememberLocation(chn, targetName);
                 lastErr = save::found;
+                Abort();
+                return true;
+            }
+            // A DELETE IS ALREADY DONE BY THE TIME ::Resolve RETURNS, the same
+            // way a find is: CARD_Delete removed the entry up there, so there
+            // is no transfer to run and nothing opened for Finish to close.
+            // ::Abort still unmounts, which is the one thing left to do.
+            //
+            // THE LOCATION IS DROPPED, NOT REMEMBERED -- the opposite of the
+            // find above, and for the same reason: it would name a directory
+            // entry that no longer exists, so the next ::GetSaveLocation must
+            // ask the card instead of trusting it. ::freeValid goes too, the
+            // freed blocks being the one thing this is certain to have changed.
+            if (op == Op::Deleting) {
+                haveLocation  = false;
+                freeMaskValid = false;
+                lastErr       = save::found;
                 Abort();
                 return true;
             }
@@ -1333,6 +1372,30 @@ Response CreateSave(const void* src, const std::size_t size, const Response* res
 Response GetSaveLocation() {
     if (Busy(Op::Finding)) return { .done = false, .err = busy, .path = nullptr };
     return Report(Tick(Op::Finding, nullptr, nullptr, 0, nullptr));
+}
+
+/**
+ * @brief Removes this game's save from the card.
+ *
+ * TICKED LIKE EVERY OTHER OPERATION IN THIS HALF, because it is the same
+ * sequence every one of them runs: probe the slot, mount the card, resolve the
+ * name, and only then touch it. A delete is not cheaper than a save here -- the
+ * mount is the expensive part and it is unavoidable -- so a caller loops on
+ * `while (!response.done)` exactly as it does for ::Save.
+ *
+ * NO BYTES AND NO SIZE: ::Begin lets it through the size check for the reason
+ * ::Finding and the metadata ops are let through, and ::Resolve does the whole
+ * of the work with CARD_Delete rather than opening anything. See both.
+ *
+ * save::missing IS THE OTHER SUCCESS. A card with no save on it answers
+ * CARD_ERROR_NOFILE from the name search, which ::MapError turns into
+ * save::missing -- "there was nothing to remove" -- and save.hpp calls that the
+ * same end state rather than an error. Only a card that is absent, broken or
+ * refuses the directory write is a real failure.
+ */
+Response Delete() {
+    if (Busy(Op::Deleting)) return { .done = false, .err = busy, .path = nullptr };
+    return Report(Tick(Op::Deleting, nullptr, nullptr, 0, nullptr));
 }
 
 /**
@@ -2269,6 +2332,70 @@ Response GetSaveLocation() {
     // A search that found nothing forgets what it thought it knew: a `path`
     // handed back now would name a file this very call failed to stat.
     haveLocation = false;
+    Fail(best);
+    return { .done = true, .err = best, .path = nullptr };
+}
+
+/**
+ * @brief Removes this game's save from wherever it is, which on a FAT volume is
+ *        one unlink.
+ *
+ * EVERY DEVICE, NOT JUST THE REMEMBERED ONE, and that is the half the GameCube
+ * does not have to think about. This console has two places a save can be (the
+ * front SD slot and a USB disk, ::kDeviceCount) and a player who has copied a
+ * save between them can have one on each -- so a delete that stopped at
+ * ::locationDev would leave the other behind for the next ::GetSaveLocation to
+ * find and call the save it just erased. The search is ::GetSaveLocation's own,
+ * device order and all.
+ *
+ * save::found IF ANY OF THEM HELD ONE, which is what makes this idempotent the
+ * way save.hpp promises: ENOENT on both devices is save::missing -- "there was
+ * nothing to remove" -- and that is the same end state rather than a failure.
+ * A real error on one device still loses to a successful removal on the other,
+ * because the question a caller asked was "is it gone", and it is.
+ *
+ * THE LOCATION IS FORGOTTEN UNCONDITIONALLY, including when nothing was
+ * removed: whatever it named is either gone or was never there, and the next
+ * ::GetSaveLocation stats the volumes rather than trusting a flag. ::freeValid
+ * goes with it, the freed space being the one thing a delete is certain to have
+ * changed.
+ */
+Response Delete() {
+    eError best = no_device;
+    bool   seen = false;
+    bool   gone = false;
+
+    for (u8 d = 0; d < kDeviceCount; ++d) {
+        if (!Inserted(d) || deviceBroken[d]) continue;
+        if (!Mount(d)) {
+            if (!seen || Rank(no_device) > Rank(best)) {
+                best = no_device;
+                seen = true;
+            }
+            continue;
+        }
+
+        errno = 0;
+        if (unlink(kDevicePath[d]) == 0) {
+            gone = true;
+            continue;
+        }
+
+        const eError err = MapErrno(errno);
+        if (!seen || Rank(err) > Rank(best)) {
+            best = err;
+            seen = true;
+        }
+    }
+
+    haveLocation = false;
+    freeValid    = false;
+
+    if (gone) {
+        Won();
+        return { .done = true, .err = found, .path = nullptr };
+    }
+
     Fail(best);
     return { .done = true, .err = best, .path = nullptr };
 }

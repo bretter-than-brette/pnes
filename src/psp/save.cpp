@@ -908,6 +908,46 @@ Response GetSaveLocation() {
 }
 
 /**
+ * @brief Removes the save, which on a filesystem is one unlink.
+ *
+ * ONE CALL AND IT IS OVER, unlike the GameCube's mount-write-unmount, and
+ * `done` is true on the first turn like every other operation here.
+ *
+ * THE PATH HAS TO BE RESOLVED FIRST, which is this console's own wrinkle: the
+ * save sits beside the EBOOT on whichever medium the game was launched from, so
+ * there is no compile-time name to unlink (::Resolve, and this file's header on
+ * why getcwd answers it). A build that cannot resolve one has nowhere to delete
+ * from and says save::bad_path, exactly as every other entry point here does.
+ *
+ * ::Native AND NOT ::MapErrno, for the reason that helper exists: a failing
+ * call on this platform may return the kernel's own negative code with errno
+ * untouched, so errno is cleared first and the outcome goes through ::Native to
+ * be classified. ENOENT lands on save::missing there -- "there is nothing
+ * there" being the END STATE this call exists to produce, not a failure.
+ *
+ * THE LOCATION IS FORGOTTEN EITHER WAY, including on a failure: a failed unlink
+ * says nothing reliable about what is still on the stick, so the next
+ * ::GetSaveLocation stats it rather than trusting a flag this call might have
+ * left wrong. ::freeValid goes with it, the space being the one thing a delete
+ * is certain to have changed.
+ */
+Response Delete() {
+    if (!Resolve())  return { .done = true, .err = Fail(bad_path), .path = nullptr };
+    if (!Inserted()) return { .done = true, .err = Fail(no_device), .path = nullptr };
+
+    errno = 0;
+    const int removed = unlink(savePath);
+
+    haveLocation = false;
+    freeValid    = false;
+
+    if (removed < 0) return { .done = true, .err = Native(), .path = nullptr };
+
+    Won();
+    return { .done = true, .err = found, .path = nullptr };
+}
+
+/**
  * @brief No counterpart on this console, and not a gap to be filled.
  *
  * These two move a `card_stat` -- a 64-byte entry in a GameCube memory card's
