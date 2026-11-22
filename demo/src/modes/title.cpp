@@ -1257,7 +1257,7 @@ namespace title {
                         // it backed out of is not something a player needs
                         // told in a different sound.
                         ui::impl::PostSfx(sfx::deselect);
-#ifdef SAVE_DEVICE
+#ifndef TARGET_NES
                         // ...and the one place the page's settings are written
                         // out. Every control on it writes straight into
                         // saveData.config (demo/src/save.hpp's SaveFile), so
@@ -1271,19 +1271,20 @@ namespace title {
                         // from anything declared per platform, and drawing
                         // nothing at all where it does not.
                         //
-                        // ::SAVE_DEVICE AND NOT TARGET_GC, which is what
-                        // makes a Wii -- and now a Switch -- remember its
-                        // settings. With this gated to the GameCube, a Wii
-                        // player could change anything on this page and
-                        // nothing was ever written: the save existed,
+                        // NOT ON NES, AND NOTHING NARROWER, which is what
+                        // makes a Wii -- and a Switch, a 3DS, a Wii U and a
+                        // PSP -- remember its settings. With this gated to the
+                        // GameCube, a Wii player could change anything on this
+                        // page and nothing was ever written: the save existed,
                         // ::pregame had loaded it, and the one call that writes
                         // it back was compiled out -- so every boot came up on
-                        // the scene's defaults. THAT IS THE BUG THE CAPABILITY
-                        // MACRO EXISTS TO STOP HAPPENING A THIRD TIME: every
-                        // target with somewhere to write reaches this line
-                        // because the gate is the list, rather than a platform
-                        // that has to be remembered here. All of them have the
-                        // same wheel to offer when the write will not go.
+                        // the scene's defaults. THAT IS THE BUG A PLATFORM
+                        // LIST HERE KEEPS CAUSING, which is why there is not
+                        // one: every target reaches this line and the backend
+                        // it linked decides what happens, so a new one is
+                        // right without this file hearing about it. All of
+                        // them have the same wheel to offer when the write
+                        // will not go.
                         //
                         // THE CORNERS GO FIRST, because the save screen is
                         // drawn in a different quadrant and these sprites are

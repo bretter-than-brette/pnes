@@ -63,8 +63,8 @@
  *     while (!response.done) { ...one frame... }
  *
  * loop therefore runs exactly once -- the same loop, with the same meaning, as
- * on the GameCube where it runs several times. save::busy is declared on this
- * target (save.hpp gates the vocabulary on SAVE_DEVICE) so that a game written
+ * on the GameCube where it runs several times. save::busy is declared on every
+ * target (save.hpp declares one vocabulary everywhere) so that a game written
  * against the GameCube compiles here, and is never returned. THAT IS WORTH
  * SAYING TWICE ON THIS PLATFORM: wut translates five distinct FSA failures to
  * EBUSY (FS_ERROR_BUSY, ALREADY_OPEN, JOURNAL_FULL, UNAVAILABLE_COMMAND,

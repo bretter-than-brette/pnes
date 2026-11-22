@@ -6,7 +6,7 @@
 #include "main.hpp"
 
 #include "modes/level.hpp"
-#ifdef SAVE_DEVICE
+#ifndef TARGET_NES
 #include "modes/pregame.hpp"
 #endif
 #include "modes/title.hpp"
@@ -29,7 +29,7 @@ atomic u16 frameCounter = 0;
 // target whose backend cannot save at all.
 //
 // ReSharper disable once CppUseAuto
-#ifdef SAVE_DEVICE
+#ifndef TARGET_NES
 atomic eGameModes gameMode = eGameModes::Pregame;
 #else
 atomic eGameModes gameMode = eGameModes::Title;
@@ -123,7 +123,7 @@ RESET {
                 world::main();
                 continue;
 
-#ifdef SAVE_DEVICE
+#ifndef TARGET_NES
             // No mmc3::CallInBlock and no bank tag: this mode does not exist on
             // the one platform that banks. No pNMI/pIRQ either -- it drives its
             // own frames through video::WaitForPresent and asks nothing of the

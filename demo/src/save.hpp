@@ -4,35 +4,11 @@
 
 #include "banks.hpp"
 
-// Bumped from 0 when SaveFile gained `config` below: a save written before it
-// has a different layout, and ::pregame's version check is what stops it being
-// read back as though it didn't.
-constexpr u16 saveVersion = 1;
+constexpr u16 saveVersion = 0;
 
-// ::SAVE_DEVICE AND NOT TARGET_OGC, WHICH IS WHAT MAKES THE SAVE FLOW THE
-// SWITCH'S TOO. None of these is memory-card-shaped: they are the words a wheel
-// of choices is drawn with and the names of the device slots every
-// ::save::AccessibleDevices mask has. The Wii's devices are the front SD slot
-// and USB mass storage where the GameCube's are card slots A and B, and the
-// Switch, the 3DS and the Wii U have one SD card each, and the PSP has one
-// Memory Stick (or a PSP Go's internal flash) -- which changes the TEXT
-// below and nothing about the flow, so the gate is the capability
-// (pnes/save.hpp) and the wording is what varies inside it.
-//
-// ::Card1 / ::Card2 KEEP THEIR NAMES on every console, deliberately. They are
-// the labels the choice wheel returns, indexed the way save.hpp's device
-// indices are (0 then 1), and renaming them to ::Device1 / ::Device2 would
-// touch every arm of pregame's wheels to say the same thing. What they MEAN
-// per console is in ::card1Text / ::card2Text (demo/src/modes/pregame.hpp).
-//
-// ::Card2 IS DECLARED ON A ONE-DEVICE CONSOLE AND NEVER RETURNED THERE, which
-// is the same trade save.hpp makes with ::save::busy: the wheel it labels is
-// only ever drawn when TWO devices are accessible at once (::TryCreateSave's
-// `saveDevices == 0b11`), and on the Switch, the 3DS, the Wii U and the PSP
-// that mask
-// cannot happen. The arm still has to COMPILE, and a dead one costs nothing.
+
 enum eOptions : u8 {
-#ifdef SAVE_DEVICE
+#ifndef TARGET_NES
     Continue,
     Retry,
     No,
@@ -43,7 +19,7 @@ enum eOptions : u8 {
 #endif
 };
 
-#ifdef SAVE_DEVICE
+#ifndef TARGET_NES
 constexpr auto saveMissingText      = ::charmap_generic.encode("YOU MAY CREATE A SAVE FILE");
 #ifdef TARGET_GC
 constexpr auto saveNoDeviceText    = ::charmap_generic.encode("NO MEMORY CARD INSERTED");
@@ -54,7 +30,7 @@ constexpr auto saveUseCard          = ::charmap_generic.encode("CONFIRM USE CARD
 // and no second device to choose between (src/switch/save.cpp's
 // ::kDeviceCount), and the save goes to the game's own directory on the card
 // the game booted from -- so this console asks the player NOTHING about where a
-// save goes or whether to make one (::SAVE_DEVICE_CHOICE, pnes/technology.hpp).
+// save goes or whether to make one.
 //
 // ::saveNoDeviceText IS REAL HERE: a failure is reported on every platform, and
 // an SD card the system has taken away is the one thing that can stop a save on
@@ -62,10 +38,9 @@ constexpr auto saveUseCard          = ::charmap_generic.encode("CONFIRM USE CARD
 //
 // THE OTHER TWO ARE THE WORDING A ONE-DEVICE CONSOLE WOULD USE IF IT EVER
 // ASKED, kept rather than deleted so that the strings and the flow stay in step
-// if a project chooses to ask -- which it does by defining
-// ::SAVE_DEVICE_CHOICE. ::saveChooseCard is still REFERENCED (the two-device
-// wheel compiles on every ::SAVE_DEVICE target, it just cannot be reached with
-// one bit in the mask); ::saveUseCard is referenced only inside the gate.
+// if a project chooses to ask. ::saveChooseCard is still REFERENCED (the
+// two-device wheel compiles everywhere, it just cannot be reached with one bit
+// in the mask); ::saveUseCard is referenced only inside the TARGET_OGC gate.
 constexpr auto saveNoDeviceText    = ::charmap_generic.encode("NO SD CARD FOUND");
 constexpr auto saveChooseCard       = ::charmap_generic.encode("CHOOSE DEVICE");
 constexpr auto saveUseCard          = ::charmap_generic.encode("CONFIRM USE SD CARD");
@@ -81,8 +56,8 @@ constexpr auto saveUseCard          = ::charmap_generic.encode("CONFIRM USE SD C
 //
 // THE OTHER TWO ARE THE WORDING A ONE-DEVICE CONSOLE WOULD USE IF IT EVER
 // ASKED, for the Switch's reason exactly: a project that defines
-// ::SAVE_DEVICE_CHOICE gets the prompts, and ::saveChooseCard is referenced on
-// every ::SAVE_DEVICE target regardless (the two-device wheel compiles
+// a TARGET_OGC build gets the prompts, and ::saveChooseCard is referenced
+// everywhere regardless (the two-device wheel compiles
 // everywhere, it just cannot be reached with one bit in the mask).
 constexpr auto saveNoDeviceText    = ::charmap_generic.encode("NO SD CARD FOUND");
 constexpr auto saveChooseCard       = ::charmap_generic.encode("CHOOSE DEVICE");
@@ -107,8 +82,8 @@ constexpr auto saveUseCard          = ::charmap_generic.encode("CONFIRM USE SD C
 //
 // THE OTHER TWO ARE THE WORDING A ONE-DEVICE CONSOLE WOULD USE IF IT EVER
 // ASKED, for the Switch's reason exactly: a project that defines
-// ::SAVE_DEVICE_CHOICE gets the prompts, and ::saveChooseCard is referenced on
-// every ::SAVE_DEVICE target regardless (the two-device wheel compiles
+// a TARGET_OGC build gets the prompts, and ::saveChooseCard is referenced
+// everywhere regardless (the two-device wheel compiles
 // everywhere, it just cannot be reached with one bit in the mask).
 constexpr auto saveNoDeviceText    = ::charmap_generic.encode("NO SD CARD FOUND");
 constexpr auto saveChooseCard       = ::charmap_generic.encode("CHOOSE DEVICE");
@@ -130,8 +105,8 @@ constexpr auto saveUseCard          = ::charmap_generic.encode("CONFIRM USE SD C
 //
 // THE OTHER TWO ARE THE WORDING A ONE-DEVICE CONSOLE WOULD USE IF IT EVER
 // ASKED, for the Switch's reason exactly: a project that defines
-// ::SAVE_DEVICE_CHOICE gets the prompts, and ::saveChooseCard is referenced on
-// every ::SAVE_DEVICE target regardless (the two-device wheel compiles
+// a TARGET_OGC build gets the prompts, and ::saveChooseCard is referenced
+// everywhere regardless (the two-device wheel compiles
 // everywhere, it just cannot be reached with one bit in the mask).
 constexpr auto saveNoDeviceText    = ::charmap_generic.encode("NO MEMORY STICK FOUND");
 constexpr auto saveChooseCard       = ::charmap_generic.encode("CHOOSE DEVICE");
@@ -169,39 +144,15 @@ struct SaveHeader {
 #endif
 };
 
-// The options scene's own settings, generated by uitk and included here as a
-// member of the save file rather than declared in the scene's header -- which
-// is the whole reason demo/ui/options.uis has Generate BSS Separately set.
-// Every button, slider and choice on that page is a field of this struct, so
-// changing a setting in the UI writes straight into save data and loading a
-// save restores the page already set that way: no copy-in/copy-out step, and
-// nothing for hand-written code to keep in sync.
-//
-// bss.hpp is deliberately guard-less and namespace-less (see tools/uitk's
-// BssSplit) because it is pasted into the middle of this struct. The scene's
-// generated header reaches each field back through "saveData.config.", which
-// is the Symbol Prefix set on the scene, and the prefixes behind the fields'
-// names are the node paths that produced them
-// (options_videoCanvas_reduceFlashesButton).
-//
-// Per target, like every other generated file: a scene hides different
-// controls on different targets (options.uis has no widescreen button on NES),
-// so this struct's own layout is that target's set of settings and nothing
-// more.
+
 #ifndef GEN_TARGET_DIR
 #error "GEN_TARGET_DIR is not set -- add it to this target's CMakeLists.txt branch."
 #endif
 
-// ANY MEMBER ADDED HERE THAT THE NES SIDE READS MUST BE `atomic`. This struct
-// lives at a pinned address in battery-backed SRAM (::SAVEMEM) that nothing
-// initialises, but C++ still calls it
-// zero-initialised and LLVM acts on that: at LTO, a member with no store before
-// its first read is folded to zero and its storage dropped. The uitk fields in
-// `config` are already `atomic` (tools/uitk's BssSplit::decl), and `version` is
-// safe only because nothing on NES ever reads it.
+
 struct SaveFile {
 #if defined(TARGET_NES) || defined(TARGET_GBA) || defined(TARGET_NDS)
-    u8 magicWord;
+    u8 magicWord[16];
 #endif
     u16 version;
     SaveHeader header;
@@ -214,20 +165,7 @@ struct SaveFile {
 
 extern SAVEMEM SaveFile saveData;
 
-// WIDENED WITH THE FLOW: a path is not a memory-card concept. On the GameCube
-// it is "a:super_mary_sisters", on the Wii "sd:/super_mary_sisters/save.dat"
-// on the Switch "sdmc:/switch/super_mary_sisters/save.dat", on the 3DS
-// "sdmc:/3ds/super_mary_sisters/save.dat" and on the Wii U
-// "fs:/vol/external01/wiiu/super_mary_sisters/save.dat", and
-// ::pregame::main fills it from whatever ::save::GetSaveLocation answered in
-// every case.
-//
-// ON THE PSP IT IS NOT KNOWN UNTIL IT IS ASKED FOR, which is what this pointer
-// being filled from the response was always for: the save sits beside the
-// EBOOT, so the path is "ms0:/PSP/GAME/<whatever the player called the
-// folder>/save.dat" -- or the same under ef0: on a PSP Go -- and no build knob
-// or #ifdef here could have spelt it (src/psp/save.cpp).
-#ifdef SAVE_DEVICE
+#ifndef TARGET_NES
 extern char* savePath;
 #endif
 
@@ -270,3 +208,21 @@ save::Response SaveGame(void (*pump)());
 constexpr void UpdateTextForSave(const char* buff, void* target, std::size_t sName);
 constexpr void UpdateGameNameForSave(const char* buff, std::size_t sName);
 constexpr void UpdateGameDescriptionForSave(const char* buff,  std::size_t sName);
+
+inline bool ValidateSave() {
+#if defined(TARGET_NES) || defined(TARGET_GBA) || defined(TARGET_NDS)
+    constexpr u8 templateMagicWord[16] = "SUPER_MARY_GAME";
+    u8 fails = 0;
+    for (u8 i = 0; i < 16; i++) {
+        if (saveData.magicWord[i] != templateMagicWord[i]) fails++;
+    }
+
+    // repair
+    if (fails <= 4) {
+        tech::PopulateFromBuffer(saveData.magicWord, 0, templateMagicWord, 16, 1);
+    } else return false;    // bad save
+#endif
+    // run checks on saveData
+    if (saveData.version != saveVersion) return false;
+    return true;
+}

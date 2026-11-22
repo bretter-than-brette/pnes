@@ -2,11 +2,12 @@
 
 #include <pnes/save.hpp>
 
-// See the matching guard in pregame.cpp for why this is ::SAVE_DEVICE and not
-// `#ifndef TARGET_NES`: the mode needs a save device that can be absent, and
-// the macro (pnes/save.hpp) is the one list of the targets that have one --
-// the GameCube, the Wii, the Switch, the 3DS, the Wii U and the PSP.
-#ifdef SAVE_DEVICE
+// NOT ON NES, AND THAT IS THE WHOLE OF THE CONDITION. The save there IS the
+// cart (src/nes/mappers/mmc3.cpp), so there is no file to find and no device
+// to pick, and the mode would need a bank of its own besides (main.cpp's note
+// on ::mmc3::CallInBlock). Every other target asks ::save::AccessibleDevices
+// what it has and acts on the answer, so none of them needs telling here.
+#ifndef TARGET_NES
 
 constexpr auto retryText        = ::charmap_generic.encode("RETRY");
 constexpr auto continueText     = ::charmap_generic.encode("CONTINUE");
@@ -28,16 +29,16 @@ constexpr auto card2Text        = ::charmap_generic.encode("CARD 2");
 // demo/src/save.hpp's TARGET_PSP branch gives: the save goes beside the EBOOT on
 // whichever medium the game was launched from, and "MEMORY STICK" is right on
 // every model but a PSP Go running from internal flash -- which is also the one
-// configuration that can never see this wheel, since it is drawn only where a
-// player picks a device (::SAVE_DEVICE_CHOICE) and two are accessible at once,
-// and this backend has one device (src/psp/save.cpp's ::kDeviceCount).
+// configuration that can never see this wheel, since it is drawn only when two
+// devices are accessible at once, and this backend has one
+// (src/psp/save.cpp's ::kDeviceCount).
 constexpr auto card1Text        = ::charmap_generic.encode("MEMORY STICK");
 constexpr auto card2Text        = ::charmap_generic.encode("MEMORY STICK");
 #elif defined(TARGET_NX) || defined(TARGET_CTR) || defined(TARGET_WIIU)
 // ONE DEVICE, AND ::card2Text LABELS AN INDEX THAT DOES NOT EXIST HERE. The
-// wheel these label is only drawn where the player picks a device
-// (::SAVE_DEVICE_CHOICE) and two are accessible at once, neither of which is
-// true on any of these consoles -- so these are the words a Switch, 3DS or Wii U
+// wheel these label is only drawn when two devices are accessible at once,
+// which is never true on any of these consoles -- so these are the words a
+// Switch, 3DS or Wii U
 // player would see if it ever did, and saying "SD CARD" twice is a less wrong
 // thing to show than naming hardware none of them saves to. (The Wii U does
 // have USB ports; what it does not have is a backend that would put a save on
@@ -109,4 +110,4 @@ namespace pregame {
 #endif
 }
 
-#endif // SAVE_DEVICE
+#endif // TARGET_NES

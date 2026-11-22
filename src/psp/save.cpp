@@ -219,8 +219,9 @@ constexpr char kRemovablePrefix[] = "ms";
  * Neither is a case a player can get into by accident, and offering the choice
  * would mean carrying the Wii's whole two-device search (src/ogc/save.cpp) to
  * serve one model of one console. A build that wants it adds the second entry
- * here, a second path, and ::SAVE_DEVICE_CHOICE (pnes/technology.hpp) -- the
- * device VOCABULARY below is already the shape that would take.
+ * here and a second path -- the device VOCABULARY below is already the shape
+ * that would take, and the demo's wheel is drawn off the mask rather than off
+ * anything declared per platform.
  */
 constexpr u8 kDeviceCount = 1;
 static_assert(kDeviceCount <= 8, "::save::AccessibleDevices returns the mask in a u8");

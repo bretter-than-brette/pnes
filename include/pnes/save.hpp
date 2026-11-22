@@ -27,43 +27,41 @@ namespace save {
     /**
      * @brief What a finished operation has to say about itself.
      *
-     * ::SAVE_DEVICE AND NOT TARGET_GC, WHICH IS A STATEMENT ABOUT THE WII AND
-     * NOW ABOUT THE SWITCH TOO. The seven codes past ::no_device used to be
-     * gated on the GameCube alone, because the memory-card backend was the only
-     * one that could produce them -- and src/ogc/save.cpp's Wii half said so,
-     * answering ::missing where it meant ::no_device because the precise code
-     * was not declared on its own target. The Wii now saves to a FAT volume
-     * (the front SD slot or USB mass storage) and reaches every one of these
-     * honestly: a file that is already there is ::exists, a full card is
-     * ::full, a read-only volume is ::denied. The Switch's SD-card backend (src/switch/save.cpp) reaches
-     * the same ones through the same errno, which is the whole reason the gate
-     * is now a capability and not a platform: see ::SAVE_DEVICE. The 3DS, the
-     * Wii U and the PSP reach them the same way again -- the PSP with one
-     * wrinkle of its own, since its POSIX layer leaves errno untouched for
+     * ONE VOCABULARY, ON EVERY TARGET. Saving is a feature of all the hardware
+     * this library supports; what differs is HOW a save happens, which is the
+     * backend's business and not something a caller should have to compile
+     * differently for. So every code is declared everywhere, and a backend
+     * returns the ones its medium can actually produce.
+     *
+     * THE CODES PAST ::no_device USED TO BE GATED, first on the GameCube alone
+     * and then on a SAVE_DEVICE capability macro, on the reasoning that a
+     * battery cart has one failure mode and a game built for it should not be
+     * offered codes it can never see. That reasoning does not survive contact
+     * with its own exception: ::busy was already declared on backends that can
+     * never return it -- a FAT transfer is a blocking libfat call and a Switch
+     * transfer a blocking stdio one, so no operation on either is ever in
+     * flight across two calls -- and the gate's own comment conceded the point,
+     * that a game handling ::busy for the GameCube must still COMPILE on them
+     * and A DEAD BRANCH COSTS IT NOTHING. That is true of every code here. An
+     * enumerator declared and never returned emits no instructions on any
+     * target, the NES included; what costs ROM is a `switch` a game chose to
+     * write, and which arms are worth writing is the game's call to make
+     * against its own budget rather than this header's to make for it.
+     *
+     * WHAT A BACKEND CAN PRODUCE IS DOCUMENTED WHERE THE BACKEND IS, which is
+     * the other half of dropping the gate: src/nes/mappers/mmc3.cpp answers
+     * every call ::found because the save IS the cart, src/all/save.cpp answers
+     * ::no_device forever because there is nowhere to put one, and the six
+     * device-backed backends reach the rest honestly -- a file already there is
+     * ::exists, a full medium ::full, a read-only volume ::denied. The PSP has
+     * one wrinkle of its own, since its POSIX layer leaves errno untouched for
      * failures outside one sce error family and that backend has to say
      * ::failed where it cannot classify what happened (src/psp/save.cpp).
-     *
-     * STILL GATED AT ALL, rather than declared everywhere, for the NES's sake:
-     * a battery cart has one failure mode and a game that compiles for it
-     * should not be offered six codes it can never see. ::SAVE_DEVICE is
-     * defined for every target with a save device that can be absent, so this
-     * widens the vocabulary to the Wii and the Switch WITHOUT touching the NES,
-     * the desktop, or any target still on the weak backend in
-     * src/all/save.cpp. A future backend widens it by adding itself to that
-     * one macro.
-     *
-     * ::busy IS DECLARED ON THE WII AND THE SWITCH AND NEVER RETURNED THERE,
-     * deliberately. A FAT transfer is a blocking libfat call, and a Switch
-     * transfer a blocking stdio one, rather than a ticked card sequence -- so
-     * no operation on either is ever in flight across two calls and nothing can
-     * collide with one. But a game that handles ::busy for the GameCube must
-     * still COMPILE on them, and a dead branch costs it nothing.
      */
     enum eError : u8 {
         found,
         missing,
         no_device,
-#ifdef SAVE_DEVICE
         busy,
         exists,
         full,
@@ -71,7 +69,6 @@ namespace save {
         denied,
         bad_path,
         failed,
-#endif
     };
 
     /**
