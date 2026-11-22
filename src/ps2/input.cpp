@@ -1,22 +1,7 @@
 /**
  * @file input.cpp
- * @brief Controller polling for the Sony PlayStation 2 backend (libpad).
- *
- * Maps the DualShock's face buttons/D-pad onto the same NES button bitmask
- * the rest of the engine expects (see ::Buttons in input.hpp). A single
- * player is wired for now, so port 2 (the second physical controller port)
- * is always idle; Cross/Circle map to the NES A/B face buttons (Cross as
- * the "confirm" button matches every PS2 menu convention), with Start/
- * Select as Start/Select.
- *
- * SIO2MAN and PADMAN are BIOS-resident modules (unlike audsrv, see
- * src/ps2/audio.cpp) -- SifLoadModule("rom0:...") loads them straight out of
- * the console's own ROM, with no IRX to embed.
- *
- * libpad's padButtonStatus::btns is active-LOW hardware convention (a
- * pressed button reads as a CLEARED bit) -- every ps2sdk pad sample XORs
- * against 0xffff to get an active-HIGH mask before testing it, so this does
- * the same.
+ * @brief Controller polling for the PS2 backend (libpad). SIO2MAN and PADMAN are
+ *        BIOS-resident, so no module is embedded for this one.
  */
 #include "internal.hpp"
 #include <pnes/input.hpp>

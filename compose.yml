@@ -1,51 +1,11 @@
-# Cross-platform build entry point for pnes.
+# Cross-platform build entry point. Run from the repository root in any shell:
 #
-# Run from the repository root, in any shell (PowerShell, bash, zsh, cmd):
+#   docker compose run --rm build-nes      # NES ROM
+#   docker compose run --rm build-linux    # Linux desktop demo
+#   ...one service per target, see below
 #
-#   docker compose run --rm build-linux     # Linux desktop demo
-#   docker compose run --rm build-nes       # NES ROM (demo.nes)
-#   docker compose run --rm build-gc        # GameCube demo.dol
-#   docker compose run --rm build-wii       # Wii demo.dol (also runs on Wii U / vWii)
-#   docker compose run --rm build-3ds       # Nintendo 3DS demo.3dsx
-#   docker compose run --rm build-ps2      # PlayStation 2 demo.elf
-#
-# Override the preset by setting PRESET in the environment:
-#
-#   PRESET=linux-debug docker compose run --rm build-linux          # bash
-#   $env:PRESET="linux-debug"; docker compose run --rm build-linux  # PowerShell
-#
-# The same image also carries the i386 and arm64 multiarch SDL3/libusb/ALSA
-# packages (plus g++-multilib / crossbuild-essential-arm64) needed for the
-# 32-bit and arm64 builds, selected the same way:
-#
-#   PRESET=linux-x86-release   docker compose run --rm build-linux
-#   PRESET=linux-arm64-release docker compose run --rm build-linux
-#
-# linux-arm64-release is a real cross build here (this image is amd64),
-# using the aarch64 cross toolchain + multiarch dev packages installed by
-# docker/Dockerfile.linux -- CMakeLists.txt checks for those packages
-# directly (via PKG_CONFIG_LIBDIR), not for anything Docker-specific.
-#
-# Output is written to ./cmake-build-ci-<preset-name> in the repository root
-# (kept out of builds/, which is reserved for non-CI local/IDE build trees).
-# These are the same commands CI runs (.github/workflows/ci.yml), so the
-# Linux and NES jobs reproduce locally byte-for-byte (also via `act -j ...`).
-#
-# File ownership of the build output:
-#   The containers run as ${UID}:${GID}, defaulting to 0:0 (root) when those
-#   are unset -- which is what CI uses, so CI output stays root-owned exactly as
-#   before. To make LOCAL output owned by you (so you can delete build trees
-#   without sudo), pass your ids on the command line:
-#
-#       UID=$(id -u) GID=$(id -g) docker compose run --rm build-gc
-#
-#   or, to avoid repeating it, create an uncommitted .env in the repo root once:
-#
-#       printf 'UID=%s\nGID=%s\n' "$(id -u)" "$(id -g)" > .env
-#
-#   Compose auto-loads .env; it is gitignored so it never reaches CI's checkout
-#   (CI then falls back to the 0:0 default). $HOME is pointed at /tmp because a
-#   non-root uid has no home directory inside the image.
+# Override the preset with PRESET in the environment. The Linux image also
+# carries the i386 and arm64 multiarch packages the 32-bit and arm64 builds need.
 
 services:
   build-nes:
@@ -65,54 +25,6 @@ services:
       - -c
       - |
         set -euo pipefail
-        # Pass the toolchain + prefix + top-level linker script explicitly
-        # rather than letting CMakeLists derive them from local.cmake: that
-        # file is gitignored (per-developer), so it never reaches CI's
-        # checkout, and even a bind-mounted local dev copy would FORCE these
-        # to host paths that don't exist inside the container. Build into a
-        # dedicated dir so the container never clashes with an
-        # IDE-configured cmake-build-nes-* tree (their CMakeCache.txt
-        # records a different, host source path).
-        # PNES_AUDIO_SECTION and PNES_UI_SECTION are here for
-        # the same reason as TOPLEVEL_LD: all three are mandatory with no
-        # default (a guessed section would place the module in whatever bank
-        # the library assumed, which is the wrong-bank-with-no-diagnostic
-        # failure the design exists to prevent), and all three normally come
-        # from the gitignored local.cmake. Audio's value must match
-        # demo/famistudio_config.s's code segment -- CMakeLists encodes this
-        # value into the .inc that file includes, so this is the one place
-        # the two are named. UI has no such external contract -- .prg_rom_cold
-        # co-locates it with the cold bank, same as local.cmake.example.
-        # TITLE/SYSMEM are the same story, one level up: uitk-generated
-        # demo/gen/**/*.hpp references them directly (see CMakeLists.txt's
-        # DEMO_PLACEMENT_DEFINES), also gitignored-local.cmake-only and also
-        # mandatory (FATAL_ERROR if unset) -- same values as
-        # local.cmake.example: TITLE co-locates with the cold bank like UI's
-        # above, SYSMEM mirrors mmc3.hpp's own ::SYSMEM (.sysmem, onboard
-        # system RAM).
-        # SAVE_FILE=1: this demo's cart carries battery-backed PRG-NVRAM, and
-        # that is not a free-floating preference -- demo/src/header.hpp's
-        # HEADER() declares 8192 bytes of prg_nvram, and nes2.hpp
-        # static_asserts that the two AGREE:
-        #
-        #   static_assert(::nes2::save_file == ((prg_nvram_bytes) != 0))
-        #
-        # so a build that declares the chip without setting SAVE_FILE fails to
-        # compile rather than shipping a ROM whose header battery bit is clear
-        # (which is a cart no emulator ever creates a save file for). Same
-        # gitignored-local.cmake-only story as TOPLEVEL_LD and friends above,
-        # and the reason this line exists: CI has no local.cmake, so without it
-        # the NES job is the only job in the matrix that cannot build.
-        # ALTERNATIVE_NAMETABLE=1: this demo's own board wiring, not a generic
-        # engine default (local.cmake.example leaves it unset/commented --
-        # most real MMC3 boards are ordinary 2-nametable, so it's genuinely
-        # per-board). This demo's title screen deliberately writes its
-        # menu/logo past row 30 -- off-screen storage revealed by the raster
-        # split -- which needs a real fourth quadrant to land in; ordinary
-        # 2-way mirroring only ever provides 2 physical nametables, aliasing
-        # that write back onto rows the level-preview background already
-        # occupies. Same gitignored-local.cmake-only story as TOPLEVEL_LD
-        # above, so CI needs it passed explicitly too.
         cmake --preset "$$PRESET" -B "cmake-build-ci-$$PRESET" \
           -DCMAKE_TOOLCHAIN_FILE="$$LLVM_MOS_SDK/lib/cmake/llvm-mos-sdk/llvm-mos-toolchain.cmake" \
           -DCMAKE_PREFIX_PATH="$$LLVM_MOS_SDK" \
@@ -143,23 +55,10 @@ services:
       - -c
       - |
         set -euo pipefail
-        # Dedicated build dir (see build-nes) so the container never clashes
-        # with an IDE-configured cmake-build-linux-* tree on the host mount.
-        # ALTERNATIVE_NAMETABLE=1 -- see build-nes's own comment on it above:
-        # this demo's board wiring (four real nametables), not an engine
-        # default, needed by every backend that renders this same title
-        # screen, not just NES.
         cmake --preset "$$PRESET" -B "cmake-build-ci-$$PRESET" -DALTERNATIVE_NAMETABLE=1
         cmake --build "cmake-build-ci-$$PRESET" -j"$$(nproc)"
         echo "Built: cmake-build-ci-$$PRESET/demo"
 
-  # GameCube + Wii share one image (devkitPPC + libogc); the preset selects the
-  # console toolchain (GameCube.cmake vs Wii.cmake). The gc-/wii-release presets
-  # already point CMAKE_TOOLCHAIN_FILE at $DEVKITPRO/cmake/*, and DEVKITPRO is
-  # exported by the base image, so no explicit -DCMAKE_TOOLCHAIN_FILE is needed
-  # (unlike build-nes, whose SDK path can't be derived from a bind-mounted
-  # local.cmake). The OGC branch never reads LLVM_MOS_SDK, so a forced value in a
-  # developer's local.cmake is inert here.
   build-gc:
     build:
       context: docker
@@ -202,12 +101,6 @@ services:
         cmake --build "cmake-build-ci-$$PRESET" -j"$$(nproc)"
         echo "Built: cmake-build-ci-$$PRESET/demo.dol"
 
-  # Nintendo 3DS (devkitARM + libctru + citro2d). The ctr-release preset points
-  # CMAKE_TOOLCHAIN_FILE at $DEVKITPRO/cmake/3DS.cmake, and DEVKITPRO is exported
-  # by the base image, so no explicit -DCMAKE_TOOLCHAIN_FILE is needed (unlike
-  # build-nes). The backend renders the shared software PPU to one RGBA texture
-  # via citro2d (the PICA200 has no paletted textures), so it never reads
-  # LLVM_MOS_SDK and a forced value in a developer's local.cmake is inert here.
   build-3ds:
     build:
       context: docker
@@ -229,12 +122,6 @@ services:
         cmake --build "cmake-build-ci-$$PRESET" -j"$$(nproc)"
         echo "Built: cmake-build-ci-$$PRESET/demo.3dsx"
 
-  # Nintendo Switch (devkitA64 + libnx). The switch-release preset points
-  # CMAKE_TOOLCHAIN_FILE at $DEVKITPRO/cmake/Switch.cmake, and DEVKITPRO is
-  # exported by the base image, so no explicit -DCMAKE_TOOLCHAIN_FILE is needed
-  # (unlike build-nes). The backend rasterises the shared software PPU and CPU
-  # scale-blits it into the libnx framebuffer (no deko3d), so it never reads
-  # LLVM_MOS_SDK and a forced value in a developer's local.cmake is inert here.
   build-switch:
     build:
       context: docker
@@ -256,13 +143,6 @@ services:
         cmake --build "cmake-build-ci-$$PRESET" -j"$$(nproc)"
         echo "Built: cmake-build-ci-$$PRESET/demo.nro"
 
-  # Native Nintendo Wii U (devkitPPC + wut + the SDL2 portlib). The wiiu-release
-  # preset points CMAKE_TOOLCHAIN_FILE at $DEVKITPRO/cmake/WiiU.cmake, and
-  # DEVKITPRO is exported by the base image, so no explicit -DCMAKE_TOOLCHAIN_FILE
-  # is needed (unlike build-nes). This is the NATIVE Cafe OS target (.rpx/.wuhb),
-  # NOT the vWii .dol from build-wii. The backend rasterises the shared software
-  # PPU into an SDL2 streaming texture the GPU scales to the window, so it never
-  # reads LLVM_MOS_SDK and a forced value in a developer's local.cmake is inert.
   build-wiiu:
     build:
       context: docker
@@ -275,10 +155,6 @@ services:
     environment:
       PRESET: ${PRESET:-wiiu-release}
       HOME: /tmp
-      # Optional: the Wii U common key (32 hex, or a path to a file holding it).
-      # When set, demo-wup encrypts an installable WUP; when empty it just emits
-      # the unpacked tree. NEVER committed -- supply it on the host invocation,
-      # e.g.  WIIU_COMMON_KEY=<key> docker compose run --rm build-wiiu
       WIIU_COMMON_KEY: ${WIIU_COMMON_KEY:-}
     command:
       - bash
@@ -287,20 +163,9 @@ services:
         set -euo pipefail
         cmake --preset "$$PRESET" -B "cmake-build-ci-$$PRESET" -DALTERNATIVE_NAMETABLE=1
         cmake --build "cmake-build-ci-$$PRESET" -j"$$(nproc)"
-        # Also assemble the installable-title path: demo-wup emits the unpacked
-        # code/content/meta tree and, when WIIU_COMMON_KEY is set, packs a WUP.
-        # Without a key it skips encryption (leaving the usable tree), so this is
-        # safe to run unconditionally -- no secret is needed for the homebrew build.
         cmake --build "cmake-build-ci-$$PRESET" --target demo-wup
         echo "Built: cmake-build-ci-$$PRESET/demo.rpx (+ .wuhb, + wup/ tree)"
 
-  # Nintendo DS (devkitARM + libnds). The nds-release preset points
-  # CMAKE_TOOLCHAIN_FILE at $DEVKITPRO/cmake/NDS.cmake, and DEVKITPRO is exported
-  # by the base image, so no explicit -DCMAKE_TOOLCHAIN_FILE is needed (unlike
-  # build-nes). This is Model B: the backend maps the NES PPU onto the DS's native
-  # 2D tile hardware (BG tilemap + hardware OBJ + per-scanline HBlank scroll) via
-  # the shared emu band/OAM seam, so it never reads LLVM_MOS_SDK and a forced
-  # value in a developer's local.cmake is inert here.
   build-nds:
     build:
       context: docker
@@ -322,10 +187,6 @@ services:
         cmake --build "cmake-build-ci-$$PRESET" -j"$$(nproc)"
         echo "Built: cmake-build-ci-$$PRESET/demo.nds"
 
-  # Nintendo DSi -- the same libnds backend and image as build-nds, but the
-  # dsi-release preset compiles with TARGET_DSI (the 16 MB / faster-clock variant
-  # that may later embed crunched audio; for now it shares the DS audio stub). A
-  # standard .nds runs on DSi, so the ROM packaging is identical.
   build-dsi:
     build:
       context: docker
@@ -347,23 +208,11 @@ services:
         cmake --build "cmake-build-ci-$$PRESET" -j"$$(nproc)"
         echo "Built: cmake-build-ci-$$PRESET/demo.nds"
 
-  # PlayStation 2 (ps2sdk / EE+IOP), via the official prebuilt ps2dev/ps2dev
-  # image -- see docker/Dockerfile.ps2. ps2-release's condition checks PS2DEV,
-  # which this image exports, so no explicit -DCMAKE_TOOLCHAIN_FILE is needed
-  # (same shape as build-3ds/build-switch/build-wiiu above). cmake/PS2.cmake
-  # is this project's own toolchain file -- ps2dev ships no CMake toolchain of
-  # its own, unlike devkitPro/pspdev.
   build-ps2:
     build:
       context: docker
       dockerfile: Dockerfile.ps2
     image: pnes-ps2:latest
-    # ps2dev/ps2dev is Alpine-based, so this uses sh, not the bash every other
-    # build-* service here shells out to -- bash isn't installed on Alpine by
-    # default.
-    # network_mode: host works around this host's bridge driver being unable
-    # to create veth pairs for new containers/networks (confirmed separately);
-    # harmless here either way since this target does no network I/O at run time.
     network_mode: host
     user: "${UID:-0}:${GID:-0}"
     working_dir: /tmp/pnes
@@ -377,32 +226,15 @@ services:
       - -c
       - |
         set -eu
-        # ALTERNATIVE_NAMETABLE=1 -- see build-nes's comment on it: this demo's
-        # board wiring (four real nametables), needed by every backend that
-        # renders this same title screen. The ps2 branch of CMakeLists.txt
-        # honours it exactly like the other console branches do.
         cmake --preset "$$PRESET" -B "cmake-build-ci-$$PRESET" -DALTERNATIVE_NAMETABLE=1
         cmake --build "cmake-build-ci-$$PRESET" -j"$$(nproc)"
         echo "Built: cmake-build-ci-$$PRESET/demo.elf"
 
-  # PlayStation 3 (ps3dev/PSL1GHT). Unlike every other build-* service here,
-  # the first `docker compose build build-ps3` is a from-source cross-compiler
-  # build and takes 30-60+ minutes -- there is no usable prebuilt PS3 toolchain
-  # image to start FROM (the only published one is pinned to a 2018 GCC 7.2
-  # that cannot compile gnu++23 at all). See docker/Dockerfile.ps3.
-  #
-  # This image is Debian-based (not Alpine like build-ps2), so bash is used
-  # here the same way the devkitPro services use it. The build compiles with
-  # Clang against ps3dev's newlib/libstdc++ and links with ppu-g++ -- see
-  # cmake/PS3.cmake for why that split exists.
   build-ps3:
     build:
       context: docker
       dockerfile: Dockerfile.ps3
     image: pnes-ps3:latest
-    # Same workaround as build-ps2: this host's bridge driver can't create
-    # veth pairs for new containers/networks, and the configure step does real
-    # network I/O (FetchContent of intsh/tuple/stb).
     network_mode: host
     user: "${UID:-0}:${GID:-0}"
     working_dir: /tmp/pnes
@@ -416,10 +248,6 @@ services:
       - -c
       - |
         set -euo pipefail
-        # ALTERNATIVE_NAMETABLE=1 -- see build-nes's comment on it: this demo's
-        # board wiring (four real nametables), needed by every backend that
-        # renders this same title screen. The ps3 branch of CMakeLists.txt
-        # honours it exactly like the other console branches do.
         cmake --preset "$$PRESET" -B "cmake-build-ci-$$PRESET" -DALTERNATIVE_NAMETABLE=1
         cmake --build "cmake-build-ci-$$PRESET" -j"$$(nproc)"
         echo "Built: cmake-build-ci-$$PRESET/EBOOT.BIN"

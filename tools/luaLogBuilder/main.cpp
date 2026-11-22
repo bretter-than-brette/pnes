@@ -1,43 +1,18 @@
-// lua_log_builder -- reads a linked NES demo.elf (llvm-mos, ELF32) and writes
-// logdata.lua next to the shipped demo.nes ROM, for tools/pnes.lua to load
-// in Mesen. See include/pnes/logger.hpp for what it's reading and
-// why: log() call sites cost zero ROM bytes, so the only trace of them is
-// (a) compiler-generated (file, line, message) metadata sitting in the
-// linked .elf's .pnes_log section (never in demo.nes itself), and (b) the
-// same .elf's ordinary DWARF .debug_line table, which this tool uses to turn
-// that (file, line) into a real instruction address -- nothing here ever
-// opens a .cpp/.hpp source file.
+// lua_log_builder -- reads a linked NES demo.elf and writes logdata.lua beside
+// the ROM for tools/pnes.lua to load in Mesen.
 //
-// It also emits `memory = { stackTop, stackBottom, heapStart, heapSize }`
-// into logdata.lua, read straight off the linker-provided absolute symbols
-// __stack/__static_writeable_end/__heap_start/__heap_default_limit (see
-// demo/link.ld). Unlike log points, these never need LMA translation: this
-// project's PRG-RAM window ($6000-$7FFF) isn't bank-switched by MMC3, so the
-// linked address already is the live CPU address tools/pnes.lua reads at
-// emulation time.
+// log() call sites cost zero ROM bytes, so their only trace is the (file, line,
+// message) metadata in the .elf .pnes_log section plus the ordinary DWARF line
+// table that turns it into an instruction address -- nothing here opens a source
+// file. It also emits the stack and heap bounds, read off the linker-provided
+// symbols; those need no translation, the PRG-RAM window not being banked.
 //
-// The remaining problem this tool solves is turning that address into a
-// flat, bank-switching-agnostic PRG-ROM byte offset ("LMA") -- PRG-relative,
-// exactly like Mesen's own emu.memType.nesPrgRom addresses that
-// tools/pnes.lua compares it against, so demo.nes's iNES header is NOT part
-// of it (see RomLocator::HeaderBytes). The
-// naive approach -- trusting the .elf's own section file offsets -- is
-// WRONG for this toolchain: llvm-mos produces demo.nes directly from the
-// project's own linker-script OUTPUT_FORMAT{FULL(region)...} ordering (see
-// src/nes/mappers/mmc3-helper.ld's own comments), which is project-specific
-// and unrelated to demo.nes.elf's own internal section layout. Instead,
-// each real (ALLOC, non-debug) section's own byte CONTENT is located
-// directly inside demo.nes by search -- content is identical between the
-// two files regardless of layout, so this never needs to know a project's
-// OUTPUT_FORMAT ordering, any mapper's bank-encoding scheme, or anything
-// else project/mapper-specific. Verified against a real build before
-// writing this: every PRG-ROM/CHR-ROM section content-matched demo.nes at
-// exactly one position.
-//
-// Usage: lua_log_builder --elf <path/to/demo.nes.elf> --output <path/to/logdata.lua>
-//        [--rom <path/to/demo.nes>]   (default: --elf path with a trailing
-//                                      ".elf" stripped, matching this
-//                                      project's own naming convention)
+// The real work is turning an address into a flat, bank-agnostic PRG-ROM offset.
+// Trusting the .elf own section file offsets is wrong for this toolchain:
+// llvm-mos writes the ROM from the project OUTPUT_FORMAT ordering, which is
+// unrelated to the .elf internal layout. So each section is located inside the
+// ROM by searching for its own byte CONTENT, which is identical between the two
+// files whatever the layout -- so this needs to know no mapper bank scheme.
 
 #include <cstdint>
 #include <cstdio>
@@ -73,9 +48,6 @@ std::string ReadCString(const std::vector<u8> &data, std::size_t off) {
     return std::string(start); // stops at the embedded NUL, same as strlen
 }
 
-// ---------------------------------------------------------------------
-// Minimal ELF32 reader: just enough to enumerate sections and symbols.
-// ---------------------------------------------------------------------
 
 struct Section {
     std::string name;
@@ -137,7 +109,6 @@ struct Elf {
                                  raw[i].offset, raw[i].size, raw[i].link };
         }
 
-        // Symbol table: first SHT_SYMTAB section found, string table via its sh_link.
         for (u16 i = 0; i < e_shnum; ++i) {
             if (raw[i].type != SHT_SYMTAB) continue;
             const u32 strtab_off = raw[raw[i].link].offset;
@@ -167,19 +138,6 @@ struct Elf {
         return std::nullopt;
     }
 
-    /// Reads a real, initialized C object's float value straight out of the
-    /// section that backs it -- for a genuine data symbol (some section
-    /// index, not SHN_ABS/SHN_UNDEF), `value` is its address, not its
-    /// content, so this looks up that section and indexes into the ELF's own
-    /// bytes at the matching file offset, reinterpreted as a little-endian
-    /// IEEE-754 single ("float" on this target, as on the host building this
-    /// tool -- both are plain 4-byte IEEE-754, so a raw memcpy is exact, no
-    /// byte-swapping or format conversion needed). Used for
-    /// silentHeapAmount/silentStackAmount (logger.hpp), each a project's
-    /// OWN opt-in override of what fraction of that region's total size
-    /// should stay quiet -- unlike __stack/__heap_start and friends, which
-    /// are address-only linker constants with no storage at all (see
-    /// FindSymbolValue above for those).
     std::optional<float> FindSymbolFloatValue(const std::string &name) const {
         auto off = FindSymbolFileOffset(name, sizeof(float));
         if (!off) return std::nullopt;
@@ -189,12 +147,6 @@ struct Elf {
     }
 
 private:
-    /// Shared lookup behind FindSymbolFloatValue: resolves `name` to a real,
-    /// initialized C object's file offset -- for a genuine data symbol (some
-    /// section index, not SHN_ABS/SHN_UNDEF), `value` is its address, not its
-    /// content, so this looks up that section and converts to the matching
-    /// file offset. `size` bytes starting there must still fit inside the
-    /// file.
     std::optional<u32> FindSymbolFileOffset(const std::string &name, u32 size) const {
         for (auto &s : symbols) {
             if (s.name != name) continue;
@@ -210,9 +162,6 @@ private:
 
 public:
 
-    // Section whose [addr, addr+size) contains `address`, restricted to real
-    // (ALLOC, non-debug, non-.pnes_log) content -- see this file's header
-    // comment on why .pnes_log itself must never be a resolution candidate.
     const Section *FindContaining(u32 address) const {
         for (auto &s : sections) {
             if (!(s.flags & SHF_ALLOC) || s.size == 0) continue;
@@ -223,27 +172,7 @@ public:
     }
 };
 
-// ---------------------------------------------------------------------
-// .pnes_log reader. Layout is hand-decoded to match logger.hpp's Entry
-// exactly (const char *file; u32 line; const char *message; const Arg *args;
-// u8 arg_count; u8 kind;) AS COMPILED FOR THIS TARGET: llvm-mos pointers are
-// 2 bytes (real 6502 hardware addresses), so a pointer field holding one of
-// this section's own fake 0x04000000-based addresses is truncated to that
-// address's low 16 bits -- which is exactly the byte offset from the
-// section's own start, since debug-log.ld pins the section's ORIGIN to
-// 0x04000000 (zero low bits) for precisely this reason. Confirmed against a
-// real build: Entry symbols are 12 bytes (2 + 4 + 2 + 2 + 1 + 1), not the 18
-// a native 4-byte-pointer, padded-struct host would guess -- this target
-// packs struct fields with no alignment padding at all.
-//
-// Arg::address is DIFFERENT: it's a real, live CPU address (e.g. somewhere
-// in NES RAM), not a .pnes_log-relative offset, since it must still be
-// meaningful to tools/pnes.lua at emulation time, long after .pnes_log
-// itself has been discarded. It's read here as a plain 16-bit value, with
-// no offset math against the section's own base.
-// ---------------------------------------------------------------------
 
-// Mirrors logger.hpp's PNES_LOG_KIND_LOG/PNES_LOG_KIND_PAUSE exactly.
 constexpr u8 PNES_LOG_KIND_LOG = 0;
 constexpr u8 PNES_LOG_KIND_PAUSE = 1;
 
@@ -298,11 +227,6 @@ std::vector<LogEntry> ReadPnesLog(const Elf &elf) {
     return out;
 }
 
-// ---------------------------------------------------------------------
-// Minimal DWARF5 .debug_line reader -- just the line-number program, built
-// into a (file, line) -> address table. Only what this project's llvm-mos
-// toolchain actually emits (DWARF32, version 5) is supported.
-// ---------------------------------------------------------------------
 
 struct Reader {
     const u8 *p;
@@ -332,7 +256,6 @@ struct Reader {
     }
 };
 
-// DW_FORM values actually seen from this toolchain's DWARF5 file/dir tables.
 constexpr u64 DW_FORM_string = 0x08;
 constexpr u64 DW_FORM_strp = 0x0e;
 constexpr u64 DW_FORM_udata = 0x0f;
@@ -347,16 +270,11 @@ constexpr u64 DW_FORM_block = 0x09;
 constexpr u64 DW_LNCT_path = 1;
 constexpr u64 DW_LNCT_directory_index = 2;
 
-/// One directory/file-table attribute value: a string for path-shaped forms,
-/// a number for everything else (in particular DW_FORM_udata, how
-/// DW_LNCT_directory_index is encoded).
 struct FormValue {
     std::optional<std::string> str;
     std::optional<u64> num;
 };
 
-/// Reads one attribute value per its DW_FORM. `debugStr`/`lineStr` are the
-/// section bytes DW_FORM_strp/DW_FORM_line_strp offsets index into.
 FormValue ReadFormValue(Reader &r, u64 form,
                          const std::vector<u8> &debugStr, const std::vector<u8> &lineStr) {
     switch (form) {
@@ -378,7 +296,6 @@ FormValue ReadFormValue(Reader &r, u64 form,
 
 struct LineRow { u32 file; u32 line; u32 address; };
 
-/// One compilation unit's worth of resolved file paths and (file,line)->address rows.
 struct LineTable {
     std::vector<std::string> files; // index == DWARF file index for this CU
     std::vector<LineRow> rows;      // in ascending address order (as emitted)
@@ -423,14 +340,6 @@ LineTable ParseLineProgram(Reader r, const std::vector<u8> &debugStr, const std:
         }
     }
 
-    // DWARF5 gives each file entry BOTH a name and a directory index; a name
-    // can be relative (needs directories[dirIndex] prepended) even when
-    // OTHER entries for the exact same physical file are already absolute --
-    // confirmed on a real build: __FILE__'s absolute-path entry (index 0)
-    // had zero line-table rows referencing it, while a second, dir-relative
-    // entry for the identical file (by content -- same md5) is what the
-    // actual line program uses. Every entry must therefore be resolved
-    // correctly, not just the one that happens to already start with '/'.
     std::vector<std::pair<u64, u64>> fileFormats;
     readEntryFormatTable(fileFormats);
     const u64 fileCount = r.ULEB();
@@ -448,7 +357,6 @@ LineTable ParseLineProgram(Reader r, const std::vector<u8> &debugStr, const std:
         else table.files[i] = name;
     }
 
-    // ---- Line number program ----
     r.p = const_cast<u8 *>(programStart);
     struct State { u32 address = 0; u32 file = 1; u32 line = 1; bool endSeq = false; } st;
     st.file = version >= 5 ? 0 : 1; // DWARF5 file numbering starts at 0
@@ -469,7 +377,6 @@ LineTable ParseLineProgram(Reader r, const std::vector<u8> &debugStr, const std:
             } else if (sub == 2) { // DW_LNE_set_address
                 st.address = r.U32();
             } else {
-                // DW_LNE_define_file / DW_LNE_set_discriminator / vendor ext: skip.
             }
             r.p = const_cast<u8 *>(extEnd);
         } else if (opcode < opcodeBase) {
@@ -528,41 +435,15 @@ std::vector<LineTable> ParseDebugLine(const Elf &elf) {
     return tables;
 }
 
-/// How ::ResolveAddress found an address, which is exactly how much it can
-/// be trusted. Only ::Exact means "this address marks the log call site";
-/// the other two mean "this address belongs to a neighbouring statement that
-/// happened to keep a row", which can fire at the wrong time or not at all.
 enum class Fix { Exact, Forward, Backward };
 
 struct Resolution { u32 address; Fix fix; u32 fromLine; };
 
-/// Resolves (file, line) to a real instruction address.
-///
-/// An anchored build (the default -- see ::PNES_LOG_ANCHOR in
-/// include/pnes/logger.hpp) emits a `nop` at every log call site, so the
-/// line table has a row at the log's own line and ::Fix::Exact always wins.
-/// The two fallbacks exist for PNES_LOG_NO_ANCHOR builds, and they are
-/// approximations the caller is expected to warn about:
-///
-///  - ::Fix::Forward -- the next line with a row. Borrows an address that
-///    belongs to a LATER statement, so the log can fire somewhere control
-///    reaches independently (a loop head reached once per iteration, say,
-///    for a log that ran once above the loop).
-///  - ::Fix::Backward -- the previous line with a row. Fires before the
-///    log's own statement rather than at it, but still inside the same
-///    stretch of code. This exists only so a trailing log point -- one with
-///    no later row anywhere in the file, e.g. inside a switch arm the
-///    optimiser routed through a shared trampoline -- is reported in the
-///    wrong place instead of silently dropped. Silence reads as evidence,
-///    which is the worse failure.
-///
-/// Among equally-near lines the smallest address wins, for determinism.
 std::optional<Resolution> ResolveAddress(const std::vector<LineTable> &tables,
                                          const std::string &file, u32 line) {
     std::optional<u32> exact, fwd, back;
     u32 fwdLine = 0xffffffffu, backLine = 0;
     for (auto &t : tables) {
-        // Find every file index in this CU whose resolved path matches.
         for (u32 fi = 0; fi < t.files.size(); ++fi) {
             if (t.files[fi] != file) continue;
             for (auto &row : t.rows) {
@@ -585,19 +466,11 @@ std::optional<Resolution> ResolveAddress(const std::vector<LineTable> &tables,
     return std::nullopt;
 }
 
-// ---------------------------------------------------------------------
-// Content-fingerprint address -> flat PRG-ROM byte offset. See this file's
-// header comment for why this, not .elf section file offsets, is correct.
-// ---------------------------------------------------------------------
 
 class RomLocator {
 public:
     RomLocator(std::vector<u8> romBytes) : rom_(std::move(romBytes)) {}
 
-    /// Returns the flat PRG-ROM byte offset for `address`, which must
-    /// fall inside `sec` (an ALLOC section from the same .elf). Caches one
-    /// content-fingerprint search per section, since every log entry in the
-    /// same section reuses it.
     std::optional<u32> Locate(const Elf &elf, const Section &sec, u32 address) {
         auto it = sectionBase_.find(sec.name);
         if (it == sectionBase_.end()) {
@@ -628,16 +501,6 @@ private:
                       << ") -- log points resolving into this section will be skipped\n";
             return std::nullopt;
         }
-        // THE MATCH IS A demo.nes FILE OFFSET; AN LMA IS NOT. tools/pnes.lua
-        // compares these against Mesen's own emu.memType.nesPrgRom addresses,
-        // which are PRG-ROM-relative -- the iNES header is not part of that
-        // address space. PRG-ROM begins immediately after the header (and
-        // after the trainer, on the rare board that has one), so subtracting
-        // the header size here is exactly the file-offset -> PRG-offset
-        // conversion. Leaving it in shifted every log point in logdata.lua
-        // forward by 16 bytes, which silently fires a log at whatever
-        // instruction happens to start 16 bytes later -- or, far more often,
-        // never fires it at all because that byte is mid-instruction.
         const u32 headerBytes = HeaderBytes();
         std::cerr << "lua_log_builder: located " << sec.name << " (addr 0x" << std::hex << sec.addr
                    << std::dec << ") at demo.nes offset " << *found
@@ -645,10 +508,6 @@ private:
         return static_cast<u32>(*found - headerBytes);
     }
 
-    /// Bytes of demo.nes that precede PRG-ROM: the 16-byte iNES/NES2.0
-    /// header, plus a 512-byte trainer when header flags6 bit 2 says one is
-    /// present. Zero for a headerless image, so a project that ships raw
-    /// PRG needs no special case.
     u32 HeaderBytes() const {
         if (rom_.size() < 16 || std::memcmp(rom_.data(), "NES\x1a", 4) != 0) return 0;
         return 16u + ((rom_[6] & 0x04) ? 512u : 0u);
@@ -695,7 +554,6 @@ Args ParseArgs(int argc, char **argv) {
     if (a.elfPath.empty() || a.outputPath.empty())
         throw std::runtime_error("usage: lua_log_builder --elf <demo.nes.elf> --output <logdata.lua> [--rom <demo.nes>]");
     if (a.romPath.empty()) {
-        // This project's own convention: the debug ELF is named "<rom>.elf".
         const std::string suffix = ".elf";
         if (a.elfPath.size() > suffix.size() &&
             a.elfPath.compare(a.elfPath.size() - suffix.size(), suffix.size(), suffix) == 0) {
@@ -752,47 +610,21 @@ int main(int argc, char **argv) {
         if (!out) throw std::runtime_error("cannot write " + args.outputPath);
         out << "-- Generated by lua_log_builder. Do not edit; regenerated on every NES build.\n";
 
-        // Stack/heap bounds for tools/pnes.lua's stack-high-water-mark and
-        // heap-touch-bitfield tracking. All four must be present -- a build
-        // missing one (e.g. a link.ld that never carved out a heap
-        // reservation) can't be measured, so `memory` is omitted rather than
-        // emitted half-populated.
         const auto stackTop = elf.FindSymbolValue("__stack");
         const auto stackBottom = elf.FindSymbolValue("__static_writeable_end");
         const auto heapStart = elf.FindSymbolValue("__heap_start");
         const auto heapSize = elf.FindSymbolValue("__heap_default_limit");
         if (stackTop && stackBottom && heapStart && heapSize) {
-            // silentHeapAmount/silentStackAmount (logger.hpp) are each a
-            // FRACTION (0.0-1.0) of that region's total size, not an
-            // absolute byte count -- a project picks e.g. "warn past 25% of
-            // the heap" once, and it stays meaningful even if the region's
-            // actual reserved size changes later. Converted to an absolute
-            // byte count HERE, once, at build time: everything downstream
-            // (logdata.lua, tools/pnes.lua) deals in plain bytes and never
-            // needs to know a fraction was involved at all. Clamped to
-            // [0, maxVolume] in case of a stray out-of-[0,1] override.
             auto fractionToBytes = [](float fraction, u32 maxVolume) -> u32 {
                 if (fraction < 0.0f) fraction = 0.0f;
                 if (fraction > 1.0f) fraction = 1.0f;
                 return static_cast<u32>(fraction * static_cast<float>(maxVolume) + 0.5f);
             };
 
-            // Not required like the four above: a build predating this knob
-            // simply has no such symbol. Falls back to heapSize itself
-            // (fully silent until a project opts in) when absent, same
-            // practical default as before this became a fraction.
             const auto silentHeapFraction = elf.FindSymbolFloatValue("silentHeapAmount");
             const u32 silentHeapAmount = silentHeapFraction
                 ? fractionToBytes(*silentHeapFraction, *heapSize) : *heapSize;
 
-            // Same idea, for the stack -- see logger.hpp's silentStackAmount
-            // comment. Falls back to a flat 512 (not "fully silent" the way
-            // heapSize is for silentHeapAmount): unlike the heap, a stack
-            // depth under a few hundred bytes is unremarkable on this
-            // platform, so a project that hasn't overridden this at all
-            // still gets a meaningful default warning threshold rather than
-            // silence until it opts in. Capped at the region's own total
-            // size for a project whose reserved stack is smaller than that.
             const u32 stackTotalBytes = *stackTop - *stackBottom + 1;
             const auto silentStackFraction = elf.FindSymbolFloatValue("silentStackAmount");
             const u32 silentStackAmount = silentStackFraction
@@ -823,10 +655,6 @@ int main(int argc, char **argv) {
                 ++unresolved;
                 continue;
             }
-            // An inexact fix means this log point will report a place that is
-            // not its own call site (see ::Fix). Say so per call site: it
-            // changes how its output must be read, and in an anchored build it
-            // should never happen at all.
             if (res->fix != Fix::Exact) {
                 std::cerr << "lua_log_builder: warning: " << e.file << ":" << e.line
                           << " (\"" << e.message << "\") has no line-table row of its own -- using the "

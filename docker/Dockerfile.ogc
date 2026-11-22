@@ -1,34 +1,8 @@
-# GameCube + Wii (libogc / GX) build image for pnes.
-#
-# Built on devkitPro's official devkitPPC image, which ships the PowerPC
-# cross-toolchain (powerpc-eabi-g++), libogc, the GX headers, the wut/CMake
-# integration and the elf2dol/gxtexconv tools, with DEVKITPRO and DEVKITPPC
-# already exported. One image serves both consoles -- the gc-release and
-# wii-release presets select GameCube.cmake vs Wii.cmake (which only differ in
-# a couple of machine flags and the WPAD link line), so:
-#
-#   docker compose run --rm build-gc       # GameCube demo.dol
-#   docker compose run --rm build-wii      # Wii demo.dol (also runs on Wii U / vWii)
-#
-# The same image backs CI and local runs, and `act -j gc` / `act -j wii` reuse it.
+# GameCube and Wii build image (devkitPPC + libogc).
 FROM devkitpro/devkitppc:latest
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# The base image is Ubuntu-based; add the host-side build tools the project
-# needs that aren't part of the devkit toolchain itself. (Ninja is the preset
-# generator; git/wget/ca-certificates support FetchContent of intsh/tuple;
-# ffmpeg re-encodes the desktop WAV to the OGG the OGC audio backend embeds,
-# same as Dockerfile.switch/.wiiu/.web.)
-#
-# imagemagick + python3 are the GameCube memory-card banner/icon pipeline:
-# ImageMagick decodes demo/sys_assets/ogc/*.png and caps it at 256 colours,
-# tools/ogc_card_image.py packs that into the tiled CI8 + RGB5A3 form the
-# system menu reads, and demo/src/modes/pregame.cpp #embeds the result. Neither
-# is optional -- the GameCube build fails at configure time without them (the
-# Wii build in this same image uses neither, having no memory card).
-# python3-minimal would do; the full python3 is what the base image already
-# pulls in for its own scripts, and the packer imports only the stdlib.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ninja-build \
         git \
@@ -41,11 +15,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 \
     && rm -rf /var/lib/apt/lists/*
 
-# The intsh/tuple dependencies declare a CMake 4.2 floor (and CMakePresets.json
-# needs 3.21+); the devkit image's bundled CMake can lag behind. Install
-# Kitware's official binary, pinned to match docker/Dockerfile.nes and
-# docker/Dockerfile.linux so every target stays in lockstep. The symlinks go in
-# /usr/local/bin, ahead of the devkit-provided cmake on PATH.
 ARG CMAKE_VERSION=4.3.3
 RUN wget -qO- https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz \
         | tar -xz -C /opt \

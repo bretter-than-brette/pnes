@@ -1,56 +1,12 @@
-# Cross-platform Linux build image for pnes.
-#
-# Debian Trixie ships Clang 19 / GCC 14, needed to compile the engine as
-# gnu++23 (Bullseye's Clang 11 predates C++23). Trixie is also the first
-# Debian stable to carry libsdl3-dev, which is why it was picked over
-# Bookworm. The trade-off is a higher runtime floor: Trixie's glibc
-# (~2.41) means the AppImage targets reasonably recent distros rather than
-# everything back to ~Ubuntu 20.04. SDL3 and libusb-1.0 are both linked
-# dynamically against this image's system packages (not vendored/built
-# from source) via pkg-config; their -dev packages are needed here for the
-# build-time pkg-config checks, and the resulting binary expects
-# libSDL3.so.0 and libusb-1.0.so.0 to be present on whatever system runs
-# it — linuxdeploy bundles both into the AppImage at package time.
+# Linux desktop build image, with the i386 and arm64 multiarch packages
+# the 32-bit and arm64 presets need.
 FROM debian:trixie
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Use Clang for every compile step in this image. build-essential is kept
-# so libc-dev and binutils are present, but gcc is not used.
 ENV CC=clang
 ENV CXX=clang++
 
-# i386 multiarch is added for the linux-x86-* presets: the amd64 packages
-# below build the native x64 target, and libsdl3-dev:i386/libusb-1.0-0-dev:i386/
-# libasound2-dev:i386 supply the i386 headers + .pc files that
-# linux-x86-release points pkg-config at via PKG_CONFIG_LIBDIR. g++-multilib
-# is the part that's easy to miss: the i386 runtime packages alone don't
-# include the 32-bit crt objects/libstdc++/libgcc that clang --target=
-# i686-linux-gnu needs to actually link (verified: without it, ld fails with
-# "cannot find crtbeginS.o"/"-lstdc++"/"-lgcc_s"/"-lgcc").
-#
-# arm64 multiarch is added the same way for the linux-arm64-* presets: this
-# image runs on an amd64 CI runner, so linux-arm64-release is a genuine
-# cross build -- CMakeLists.txt checks for these exact packages (via
-# PKG_CONFIG_LIBDIR) rather than gating on being inside a container.
-# libsdl3-dev:arm64/libusb-1.0-0-dev:arm64/libasound2-dev:arm64 supply the
-# aarch64 headers + .pc files (CMakeLists.txt points pkg-config at their
-# multiarch dir via PKG_CONFIG_LIBDIR, mirroring the i386 case above).
-#
-# Deliberately NOT crossbuild-essential-arm64 here, unlike the i386 case's
-# g++-multilib: on Trixie that meta-package pulls in gcc-14-aarch64-linux-gnu,
-# which Conflicts with gcc-multilib (pulled in by g++-multilib above) --
-# apt refuses to install both gcc flavours in the same image ("held broken
-# packages"). clang --target=aarch64-linux-gnu never uses that cross-gcc
-# binary anyway, only the crt objects/libstdc++/libgcc/binutils it would
-# otherwise have dragged in as dependencies -- so those are installed
-# directly instead, sidestepping the gcc-vs-gcc conflict entirely:
-# binutils-aarch64-linux-gnu (as/ld, needed for "unrecognised emulation
-# mode: aarch64linux" otherwise), libc6-dev-arm64-cross +
-# linux-libc-dev-arm64-cross (crt objects/headers), and
-# libstdc++-14-dev-arm64-cross + libgcc-14-dev-arm64-cross (verified:
-# without these, linking a real binary fails the same way the i386 case's
-# comment describes).
 RUN dpkg --add-architecture i386 && dpkg --add-architecture arm64 \
     && apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
@@ -81,10 +37,6 @@ RUN dpkg --add-architecture i386 && dpkg --add-architecture arm64 \
         libgcc-14-dev-arm64-cross \
     && rm -rf /var/lib/apt/lists/*
 
-# Debian Bullseye ships CMake 3.18, but the intsh/tuple dependencies declare
-# cmake_minimum_required(VERSION 4.2) (and CMakePresets.json needs 3.21+).
-# Install a current CMake from Kitware's official Linux binary release. The CI
-# overrides this via --build-arg to stay in lockstep with the workflow's pin.
 ARG CMAKE_VERSION=4.3.3
 RUN wget -qO- https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz \
         | tar -xz -C /opt \
@@ -93,14 +45,6 @@ RUN wget -qO- https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSIO
     && ln -s /opt/cmake-${CMAKE_VERSION}-linux-x86_64/bin/cpack /usr/local/bin/cpack \
     && ln -s /opt/cmake-${CMAKE_VERSION}-linux-x86_64/bin/cmake /usr/bin/cmake
 
-# linuxdeploy + appimage plugin for producing portable AppImage bundles.
-# Both are AppImages themselves; APPIMAGE_EXTRACT_AND_RUN lets them run
-# inside the container without FUSE (which isn't available in Docker).
-#
-# The appimage plugin's bundled appimagetool resolves `mksquashfs` off PATH
-# (execvp) rather than shipping its own, so the squashfs-tools package above
-# is what actually builds the AppImage's squashfs filesystem. Without it the
-# packaging step dies with mksquashfs's usage text instead of a bundle.
 ENV APPIMAGE_EXTRACT_AND_RUN=1
 RUN wget -qO /usr/local/bin/linuxdeploy \
         https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage \

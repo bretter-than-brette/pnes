@@ -1,3 +1,7 @@
+// blobman -- packs the CHR blob from a manifest (demo/chr/config.toml) and emits
+// a header of symbolic tile ids beside it, so tile ids are never hand-assigned
+// and are usable in constexpr tables. tools/animator reads the same manifest.
+
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
@@ -22,7 +26,6 @@
 #endif
 
 namespace {
-    // one include file packed into an entry, kept for the generated header
     struct blobInclude {
         std::string name;       // symbol taken from the include filename
         std::string path;       // source path, kept for conflict reporting
@@ -55,7 +58,6 @@ namespace {
         c
     };
 
-    // chr tiles are 16 bytes, so a byte offset divides down into a tile index
     constexpr int tileSize = 16;
 }
 
@@ -164,8 +166,6 @@ int main(const int argc, char *argv[]) {
         return -1;
     }
 
-    // the manifest is only walked once the whole command line is known, so
-    // flags like -v apply no matter where they sit in argv
     if (!ProcessConfig()) return -1;
 
     if (entries == nullptr || entryCount == 0) {
@@ -178,7 +178,6 @@ int main(const int argc, char *argv[]) {
         return -1;
     }
 
-    // the header always sits beside the blob, same stem
     std::filesystem::path derived = outputFile;
     derived.replace_extension(".h");
     if (!ResolveWriteTarget(derived.string().c_str(), "generated header", headerFile)) return -1;
@@ -240,7 +239,6 @@ static const char* longFormMatches[] = {
     "--lang"        // set include language
 };
 
-// the match tables are indexed from the first real command, not from Bad
 static constexpr int commandMatchCount = End - Help;
 static_assert(std::size(shortFormMatches) == commandMatchCount);
 static_assert(std::size(longFormMatches)  == commandMatchCount);
@@ -255,8 +253,6 @@ eCommand GetCommand(const char* token) {
     return Bad;
 }
 
-// a write target names a single file that is created or replaced outright, but
-// the directory holding it has to exist already.
 bool ResolveWriteTarget(const char* token, const char* label, std::filesystem::path& dest) {
     if (token[0] == '\0') {
         std::cout << label << " path is empty\n";
@@ -294,7 +290,6 @@ bool ResolveWriteTarget(const char* token, const char* label, std::filesystem::p
 
     switch (outSt.type()) {
         case std::filesystem::file_type::not_found:
-            // nothing to replace, only the housing directory has to be writable
             if (BLOBMAN_ACCESS(parent.string().c_str(), BLOBMAN_W_OK) != 0) {
                 std::cout << "cannot write into " << label << " directory: " << parent.string()
                           << ": " << std::strerror(errno) << '\n';
@@ -325,8 +320,6 @@ bool ResolveWriteTarget(const char* token, const char* label, std::filesystem::p
 }
 
 bool ProcessConfig() {
-    // toml tables iterate in key order, not source order, so the manifest is
-    // looked up by name rather than taken off the front of the table
     const auto manifest = config["manifest"].as_table();
     if (!manifest) {
         std::cout << "requires a [manifest] table holding the blob metadata\n";
@@ -433,8 +426,6 @@ bool ProcessConfig() {
 
     entryCount = static_cast<size_t>(i);
 
-    // sort into rom order so the overlap check only has to look at neighbours,
-    // and so the generated include reads in the same order as the blob
     std::sort(entries, entries + entryCount,
               [](const entry& a, const entry& b) { return a.LMA < b.LMA; });
 
@@ -450,13 +441,10 @@ bool ProcessConfig() {
     return true;
 }
 
-// the whole buffer lands in one file, so the entries only get name checked here
-// for the include generators that read them back out
 bool WriteBlob() {
     for (size_t i = 0; i < entryCount; i++) {
         const entry& e = entries[i];
 
-        // entry names come straight from toml keys, so keep them usable as symbols
         const std::filesystem::path name = std::string(e.name);
         if (name.empty() || name.has_parent_path() || !name.has_filename()) {
             std::cout << "entry name is not a usable identifier: " << e.name << '\n';
@@ -486,8 +474,6 @@ bool WriteBlob() {
     return true;
 }
 
-// toml keys and include filenames are free form text, so fold them into
-// something that survives being pasted into a header
 static std::string MakeIdentifier(const std::string_view raw) {
     std::string id;
     id.reserve(raw.size());
@@ -506,10 +492,6 @@ static std::string Hex(const unsigned long value, const int width) {
     return hex.str();
 }
 
-// one namespace per entry: every include's tile index in character rom, plus
-// the entry's load address (for BankOf()) and size. Nothing here says where
-// the ppu sees an entry -- that is not a property of how it was packed, and
-// whatever banks the entry in is what decides it.
 bool GenerateHeader() {
     static constexpr std::string_view lmaSymbol  = "__lma";
     static constexpr std::string_view sizeSymbol = "__size";
@@ -531,7 +513,6 @@ bool GenerateHeader() {
             return false;
         }
 
-        // resolve every symbol first so the '=' column can be padded to match
         struct genSymbol {
             std::string         name;   // folded identifier
             int                 rom{};  // character rom tile index it resolves to
@@ -556,8 +537,6 @@ bool GenerateHeader() {
                 return false;
             }
 
-            // two includes folding onto one symbol would silently shadow a tile,
-            // so the manifest has to resolve it rather than blobman guessing
             for (const genSymbol& taken : symbols) {
                 if (taken.name == symbol) {
                     std::cout << "naming conflict in entry: " << e.name << ": '"
@@ -573,10 +552,6 @@ bool GenerateHeader() {
                 return false;
             }
 
-            // LMA is a byte offset into the character rom image, so it divides
-            // down the same way -- but into an index of the whole image rather
-            // than of a 256-tile pattern table, so there is nothing to mask: a
-            // 16 KiB blob alone is 1024 tiles.
             const int rom = (e.LMA + f.offset) / tileSize;
 
             symbols.push_back({ symbol, rom, &f });
@@ -586,15 +561,6 @@ bool GenerateHeader() {
         header << "\n    // " << e.name << " entry\n"
                   "    namespace " << entryName << " {\n";
 
-        // Every include, as a tile index into the character rom image.
-        // unsigned short, not char: this indexes the whole image, which passes
-        // 0xff inside the first 16 KiB -- unlike a ppu tile index, which is a
-        // byte because that is all the hardware reads, and which nothing here
-        // emits.
-        //
-        // The type names are padded to the widest of them so that the '='
-        // column lines up across the tiles and the two placement constants
-        // below, which are a different width.
         static constexpr std::string_view tileType  = "unsigned short";
         static constexpr std::string_view placeType = "unsigned long ";
 

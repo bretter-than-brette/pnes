@@ -54,72 +54,22 @@ template <> struct mmc3::bank_layout<actor_tag> {
 
 #define COLD CREATE_SEGMENT_KEYWORD(".prg_rom_cold")
 
-/**
- * @brief Pins a variable into MMC3's PRG-RAM ("cartridge memory",
- *        $6000-$7FFF).
- *
- * Explicit placement, the same way ::FIXED pins code into $E000-$FFFF: use
- * for state that should live in cartridge RAM specifically (e.g. a battery-
- * backed save struct) rather than wherever ordinary .bss/.data happens to
- * land. Backed by `.cartmem`, NOLOAD (mmc3-helper.ld) -- runtime storage
- * only, nothing is loaded into it from the ROM file. Expands to nothing
- * off-NES.
- */
 #define CARTMEM CREATE_SEGMENT_KEYWORD(".cartmem")
 
-/**
- * @brief Pins a variable to the SAVE reservation: a fixed 256 bytes at the top
- *        of MMC3's PRG-RAM window ($7F00-$7FFF).
- *
- * ::CARTMEM with an address that cannot move. Both land in the same
- * battery-backed 8 KiB and both are outside the range crt0 zeroes, but
- * `.cartmem` is placed sequentially after .data/.bss, so its address depends on
- * how much static state the build has -- add a global and it slides. For
- * anything whose contents OUTLIVE THE BUILD that is a bug waiting for a
- * firmware update: the new ROM reads the old cart at offsets nothing wrote.
- * `.savemem` is at an absolute address in demo/link.ld, which also ASSERTs the
- * reservation is big enough for whatever lands here.
- *
- * Use ::CARTMEM for cart RAM you just want; use this for the save. Expands to
- * nothing off-NES, same as ::CARTMEM.
- */
 #define SAVEMEM CREATE_SEGMENT_KEYWORD(".savemem")
 
-/**
- * @brief Pins a variable into the NES's own onboard system RAM, explicitly.
- *
- * Ordinary globals already land in system RAM via .bss/.data's default
- * placement; ::SYSMEM exists for state that specifically must NOT drift
- * into ::CARTMEM or any other region by accident -- an explicit statement
- * of intent, not a different physical destination than the untagged
- * default. Backed by `.sysmem`, NOLOAD (mmc3-helper.ld). Expands to nothing
- * off-NES.
- */
 #define SYSMEM CREATE_SEGMENT_KEYWORD(".sysmem")
 
-// On TARGET_NES, TITLE and TITLE_DATA are NOT defined here -- CMakeLists.txt
-// injects them as whole compile definitions (from local.cmake's TITLE) onto
-// the `demo` target instead, so they reach every demo .cpp/generated header
-// without needing this file #included first in the right order, and so a
-// developer's local.cmake choice of bank actually takes effect (a #define
-// here would silently win over that -D once this header's included, same
-// footgun the CallInLevelGraphics fallback below avoids with its own
-// TARGET_NES guard). TITLE_DATA is TITLE's own value with ".rodata" appended
-// there, same "distinct section NAME, same physical bank as ::COLD/::TITLE"
-// reasoning as before (clang/LLD reject code and data sharing one section's
-// literal name).
+// On NES, TITLE and TITLE_DATA are injected as compile definitions onto the
+// `demo` target instead of being defined here -- so they reach every TU without
+// an include-order requirement, and so local.cmake's choice of bank actually
+// takes effect (a #define here would silently win over that -D). TITLE_DATA is
+// TITLE's value with ".rodata" appended: a distinct section name in the same
+// physical bank, since LLD rejects code and data sharing one name.
 //
-// Off NES, nothing generates those -D flags at all (CMakeLists.txt's
-// DEMO_PLACEMENT_DEFINES only exists in the nes branch) -- but
-// shared code (demo/src/graphics/{colours,strings}.hpp, uitk-generated
-// title.cpp, ...) still tags data with TITLE/TITLE_DATA unconditionally, the
-// same way it uses ::COLD or ::ACTORS. Those compile everywhere because
-// CREATE_SEGMENT_KEYWORD itself is a no-op off NES (technology.hpp) --
-// TITLE/TITLE_DATA just need *a* definition to reach that no-op, which
-// nothing else was ever providing. The literal section name passed here is
-// irrelevant off NES (CREATE_SEGMENT_KEYWORD discards it), so there's no
-// bank/placement decision being made -- just filling in a macro every other
-// platform never had.
+// Off NES nothing generates those flags, but shared code still tags data with
+// them unconditionally -- so they just need *a* definition to reach
+// CREATE_SEGMENT_KEYWORD's no-op. The literal name passed here is discarded.
 #ifndef TARGET_NES
 #define TITLE CREATE_SEGMENT_KEYWORD("")
 #define TITLE_DATA CREATE_SEGMENT_KEYWORD("")
@@ -133,33 +83,13 @@ template <> struct mmc3::bank_layout<actor_tag> {
 
 #define LEVEL_GRAPHICS CREATE_SEGMENT_KEYWORD(".prg_rom_level_graphics")
 
-// OPTIONS/OPTIONS_DATA are NOT defined here -- demo/gen/options/*/options.hpp
-// (uitk-generated, from demo/ui/options.uis) is a standalone header that
-// never includes banks.hpp, so CMakeLists.txt feeds them in as whole compile
-// definitions instead, same mechanism as TITLE/TITLE_DATA/SYSMEM (see its own
-// comment, "TITLE / SYSMEM: placement for uitk-generated UI code"). Unlike
-// TITLE, there is no per-developer bank choice to make for OPTIONS: it's
-// hardcoded in CMakeLists.txt to demo/link.ld's own dedicated
-// prg_rom_options bank, not read from local.cmake.
 
-// ONE shared switch/restore body for window 2 (R7), defined once in
-// banks.cpp -- ordinary (non-template) function, so it exists exactly once
-// in the final binary no matter how many call sites use it. This replaces
-// mmc3::CallInBlock<Tag>, whose CallInWindow/CallInSection are templated on
-// the caller's own lambda type: every distinct call site there instantiated
-// its own out-of-line trampoline (and BOTH the R6 and R7 variants, since
-// CallInSection's window dispatch is a runtime switch), which is what blew
-// prg_rom_fixed's budget the first time this was tried.
 #ifdef TARGET_NES
 FIXED void CallInLevelGraphics(void (*fn)(void*), void* ctx);
 #else
 inline void CallInLevelGraphics(void (*fn)(void*), void* ctx) { fn(ctx); }
 #endif
 
-// Thin per-callsite shim: F is passed through ctx by pointer, so only this
-// small invoke-and-unpack wrapper is instantiated per lambda type -- none of
-// the actual register save/switch/restore logic, which lives once in
-// ::CallInLevelGraphics above.
 template <typename F>
 auto CallLevelGraphics(F&& f) -> decltype(f()) {
     using Ret = decltype(f());
@@ -183,7 +113,4 @@ decltype(auto) InColdBank(Block &&block) {
 #define ACTORS CREATE_SEGMENT_KEYWORD(".prg_rom_actors")
 
 MMC3_BIND(level::UpdateActors, actor);
-// Not an actor method, but it reads every actor's animation state to build the
-// sprite list and prg_rom_level_code had no room left for it -- and the actor
-// bank is where the data it walks already lives. See level.hpp's declaration.
 MMC3_BIND(level::FeedOAM, actor);

@@ -13,9 +13,6 @@
 namespace proj {
 namespace {
 
-/// TOML is written by hand rather than through toml++'s serializer: the output
-/// is laid out for a human reading a diff (one table per frame, one line per
-/// sprite, hex tile ids), which a generic serializer will not do.
 std::string quote(const std::string& text) {
     std::string out = "\"";
     for (const char ch : text) {
@@ -32,8 +29,6 @@ std::string hex2(int value) {
     return text;
 }
 
-/// A PPU address, four digits -- a frame's pattern table reads as $1000
-/// everywhere else in this project, not as 0x10.
 std::string hexAddr(std::uint32_t value) {
     char text[16];
     std::snprintf(text, sizeof(text), "0x%04x", value);
@@ -71,16 +66,11 @@ std::string metaspriteToml(const Metasprite& metasprite) {
             "height = " << metasprite.tilesY << "\n";
 
     for (const Frame& frame : metasprite.frames) {
-        // Frames are contiguous, so this order is play order: the last frame
-        // loops back to the first, and a timer of 0 stops the animation on the
-        // frame it is on.
         toml << "\n[[frame]]\n"
                 "name  = " << quote(frame.name) << "\n"
                 "timer = " << frame.timer;
         if (frame.timer == 0) toml << "    # 0 -- the animation stops on this frame";
         toml << "\n";
-        // Written only when set: a frame nothing asked to expose leaves the
-        // file exactly as it was before this key existed.
         if (frame.isPublic) {
             toml << "public = true    # name this frame's bytes in the generated header\n";
         }
@@ -90,16 +80,6 @@ std::string metaspriteToml(const Metasprite& metasprite) {
             continue;
         }
 
-        // One line per sprite, in placement order, which is draw order.
-        // frame/entry/include/tile is what identifies the ART: a tile id alone
-        // is ambiguous, since two entries at the same offset into their windows
-        // share ids (demo/chr/chr.h has several), and the frame is what turns
-        // an offset into an id at all. The id is written anyway because it is
-        // what the sheet shows, and `pattern` beside it because that -- id plus
-        // the pattern-table half its frame sits in -- is what a consumer
-        // actually puts in OAM. Both are re-derived from the manifest and the
-        // frames on load, so they are a record of what was exported, not the
-        // source of truth for it.
         toml << "sprites = [\n";
         for (const Sprite& sprite : frame.sprites) {
             toml << "    { col = " << sprite.col
@@ -152,8 +132,6 @@ bool save(Project& project, std::string& error) {
         return false;
     }
 
-    // Names are what the files are called, so two metasprites folding onto one
-    // stem would have them overwrite each other.
     std::vector<std::string> stems;
     stems.reserve(project.metasprites.size());
     for (const Metasprite& metasprite : project.metasprites) {
@@ -186,9 +164,6 @@ bool save(Project& project, std::string& error) {
     }
     anim << "]\n";
 
-    // Palettes are the project's, not any one metasprite's, so they live here.
-    // Index 0 of every palette is the fixed transparency entry and is not
-    // stored -- only the three colours the PPU takes after it.
     for (const pal::Palette& palette : project.palettes) {
         anim << "\n[[palette]]\n"
                 "name    = " << quote(palette.name) << "\n"
@@ -199,10 +174,6 @@ bool save(Project& project, std::string& error) {
              << " ]    # NES master-palette indices for colours 1-3\n";
     }
 
-    // Frames are the project's too, and for the same reason palettes are: a
-    // frame is an arrangement the whole project's sprites are numbered in.
-    // Window order IS the id order, so the array is written as given -- never
-    // sorted, never deduplicated.
     for (const chr::Frame& frame : project.frames) {
         anim << "\n[[frame]]\n"
                 "# The tile-id space (0x00-0xff) sprites of this project draw from.\n"
@@ -219,11 +190,6 @@ bool save(Project& project, std::string& error) {
         anim << "]\n";
     }
 
-    // Every claimed file is written first, then the stems that are no longer
-    // claimed are removed. Doing it in that order is what makes a rename safe
-    // in every case, including two metasprites swapping names: renaming each
-    // file as its metasprite is written would move a freshly written file out
-    // from under the other one.
     std::vector<std::string> previous;
     previous.reserve(project.metasprites.size());
     for (const Metasprite& metasprite : project.metasprites) {
@@ -236,10 +202,6 @@ bool save(Project& project, std::string& error) {
     }
 
     for (std::size_t i = 0; i < previous.size(); ++i) {
-        // Only a stem THIS project wrote earlier is removed, and only when
-        // nothing claims it now -- that is a rename, not a cleanup of the
-        // folder. A file the project never wrote is never touched, including
-        // the manifest of a metasprite that has since been closed.
         if (previous[i].empty() || previous[i] == stems[i]) continue;
         if (std::find(stems.begin(), stems.end(), previous[i]) != stems.end()) continue;
 
@@ -307,8 +269,6 @@ std::optional<Project> load(const std::filesystem::path& path, std::string& erro
         }
     }
 
-    // Frames before the metasprites, so a sprite naming one can be defaulted
-    // to the first against a list that is already complete.
     if (const auto frames = config["frame"].as_array()) {
         for (const auto& node : *frames) {
             const auto frameTable = node.as_table();
@@ -320,9 +280,6 @@ std::optional<Project> load(const std::filesystem::path& path, std::string& erro
                 (*frameTable)["pattern_table"].value_or<std::int64_t>(0));
             if (const auto windows = (*frameTable)["windows"].as_array()) {
                 for (const auto& window : *windows) {
-                    // A non-string window is dropped rather than skipped
-                    // silently: windows are positional, so quietly leaving one
-                    // out would renumber every window after it.
                     const auto name = window.value<std::string>();
                     if (!name) {
                         project.warnings.push_back(
@@ -367,7 +324,6 @@ std::optional<Project> load(const std::filesystem::path& path, std::string& erro
 
         Metasprite metasprite;
         metasprite.name   = (*head)["name"].value_or<std::string>(std::filesystem::path(*name).stem().string());
-        // Where it came from, so a rename after this load knows what to move.
         metasprite.savedStem = std::filesystem::path(*name).stem().string();
         metasprite.palette = (*head)["palette"].value_or<std::string>("");
         metasprite.tilesX = static_cast<int>((*head)["width"].value_or<std::int64_t>(1));
@@ -392,15 +348,8 @@ std::optional<Project> load(const std::filesystem::path& path, std::string& erro
                         sprite.col     = static_cast<int>((*spriteTable)["col"].value_or<std::int64_t>(0));
                         sprite.row     = static_cast<int>((*spriteTable)["row"].value_or<std::int64_t>(0));
                         sprite.id      = static_cast<int>((*spriteTable)["id"].value_or<std::int64_t>(0));
-                        // Absent in a project saved before `pattern` existed;
-                        // the id is the right fallback, since that is what the
-                        // export emitted then. Either way the cell this sprite
-                        // resolves to overwrites it.
                         sprite.patternByte = static_cast<int>(
                             (*spriteTable)["pattern"].value_or<std::int64_t>(sprite.id));
-                        // Absent in a project saved before frames existed. The
-                        // first frame is the right fallback: a project had one
-                        // id space then, and this is it.
                         sprite.frame   = (*spriteTable)["frame"].value_or<std::string>(
                             project.frames.empty() ? std::string() : project.frames.front().name);
                         sprite.entry   = (*spriteTable)["entry"].value_or<std::string>("");
@@ -425,9 +374,6 @@ std::optional<Project> load(const std::filesystem::path& path, std::string& erro
 const chr::Cell* findCell(const chr::Table& table, const std::string& frame,
                           const std::string& entry, const std::string& include, int tile, int id) {
     for (const chr::Cell& cell : table.cells) {
-        // An empty frame matches any: a .msprite from before frames existed
-        // named art, not an arrangement, and the table it is being resolved
-        // against is the only thing that knows which frames there now are.
         if (!frame.empty() && cell.frame != frame) continue;
         if (cell.include == include && cell.tileInInclude == tile &&
             table.entries[cell.entry].name == entry) {

@@ -46,24 +46,14 @@ import struct
 import sys
 from pathlib import Path
 
-# --------------------------------------------------------------------------- #
-# Repo layout: this script lives in demo/tiled/, so the repo root is two up.
-# --------------------------------------------------------------------------- #
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parents[1]
 
-# Symbols pulled from the ELF, with the size we expect each to be.  Size is a
-# sanity check / fallback only -- the real size comes from the symbol table.
-# Read order maps positionally onto `corners` (UL, UR, BL, BR) in build_image.
-# UR and BL are swapped here to match the metatiles source asm, where those two
-# planes' data are wired in the opposite order.
 METATILE_PLANES = ("Metatiles_UL", "Metatiles_BL", "Metatiles_UR", "Metatiles_BR")
 ATTR_PLANE = "Metatiles_ATTR"
 BGCOLOURS_SYM = "BGColours"
 CHR_SYM = "chr_rom_image"
 
-# Standard 2C02-ish NES master palette (ARGB, 0xFFrrggbb).  Used only if the
-# renderer's nes_rgb[] can't be parsed; kept byte-identical to src/SDL3/video.cpp.
 FALLBACK_NES_RGB = [
     0xFF626262, 0xFF012090, 0xFF1B0CA4, 0xFF3B009E, 0xFF520080, 0xFF5A004E,
     0xFF521610, 0xFF3F2E00, 0xFF234400, 0xFF0A5200, 0xFF005804, 0xFF004E30,
@@ -79,14 +69,6 @@ FALLBACK_NES_RGB = [
 ]
 
 
-# --------------------------------------------------------------------------- #
-# Minimal little-endian ELF reader: just enough to map a global symbol to its
-# bytes.  Avoids a pyelftools dependency.  Handles both ELF32 (the mos NES
-# pass-1 ELF) and ELF64 (the x86-64 Linux desktop debug build) -- the metatile
-# and CHR symbols are byte-identical in either, so whichever was built latest is
-# a valid source.  Only the container differs (header offsets, section/symbol
-# entry layouts), which is selected from EI_CLASS below.
-# --------------------------------------------------------------------------- #
 class Elf:
     def __init__(self, path: Path):
         self.data = path.read_bytes()
@@ -98,10 +80,6 @@ class Elf:
             raise ValueError(f"{path}: expected a little-endian ELF (32- or 64-bit)")
         self.is64 = ei_class == 2
 
-        # Header field offsets and the section/symbol entry layouts differ by
-        # class.  Section unpack yields (name, type, flags, addr, offset, size)
-        # in both; only the field widths change.  Symbol field *order* differs,
-        # so it is unpacked per-class below.
         if self.is64:
             (e_shoff,) = struct.unpack_from("<Q", self.data, 0x28)
             (e_shentsize, e_shnum, e_shstrndx) = struct.unpack_from("<HHH", self.data, 0x3A)
@@ -111,7 +89,6 @@ class Elf:
             (e_shentsize, e_shnum, e_shstrndx) = struct.unpack_from("<HHH", self.data, 0x2E)
             sec_fmt, sym_fmt, sym_sz = "<IIIIII", "<IIIBBH", 16
 
-        # Parse the section header table -> raw (name, type, addr, offset, size).
         raw_sections = []
         for i in range(e_shnum):
             base = e_shoff + i * e_shentsize
@@ -120,7 +97,6 @@ class Elf:
             )
             raw_sections.append((sh_name, sh_type, sh_addr, sh_offset, sh_size))
 
-        # Resolve section names via the section-header string table.
         self.sections = []  # (name, sh_type, sh_addr, sh_offset, sh_size)
         shstr_off = raw_sections[e_shstrndx][3]
         for (sh_name, sh_type, sh_addr, sh_offset, sh_size) in raw_sections:
@@ -128,7 +104,6 @@ class Elf:
                 (self._cstr(shstr_off + sh_name), sh_type, sh_addr, sh_offset, sh_size)
             )
 
-        # Locate .symtab (type 2) and its linked string table (sh_link).
         symtab = next((s for s in self.sections if s[0] == ".symtab"), None)
         strtab = next((s for s in self.sections if s[0] == ".strtab"), None)
         if symtab is None or strtab is None:
@@ -136,7 +111,6 @@ class Elf:
                 f"{path}: no .symtab/.strtab -- need a debug (unstripped) ELF"
             )
 
-        # Build name -> (value, size, shndx) over every symbol.
         self.symbols = {}
         sym_off, sym_size = symtab[3], symtab[4]
         str_off = strtab[3]
@@ -160,7 +134,6 @@ class Elf:
         value, size, shndx = self.symbols[name]
         if size == 0 and expected is not None:
             size = expected
-        # Prefer the symbol's own section; fall back to address containment.
         sec = self.sections[shndx] if 0 <= shndx < len(self.sections) else None
         if not (sec and sec[2] <= value < sec[2] + sec[4]):
             sec = next(
@@ -177,9 +150,6 @@ class Elf:
         return data
 
 
-# --------------------------------------------------------------------------- #
-# Inputs: master palette + ELF discovery.
-# --------------------------------------------------------------------------- #
 def parse_nes_rgb(video_cpp: Path) -> list[int]:
     """Pull the 64-entry nes_rgb[] master palette out of the SDL renderer."""
     try:
@@ -221,9 +191,6 @@ def discover_elf() -> Path | None:
     return None
 
 
-# --------------------------------------------------------------------------- #
-# CHR decode: one NES 2bpp planar tile -> 8x8 list of colour indices (0..3).
-# --------------------------------------------------------------------------- #
 def decode_tile(chr_bytes: bytes, base: int, tile_id: int) -> list[list[int]]:
     off = base + tile_id * 16
     plane0 = chr_bytes[off : off + 8]
@@ -269,9 +236,6 @@ def choose_bg_base(chr_bytes: bytes, planes: list[bytes]) -> tuple[int, dict]:
     return best, {"referenced": len(referenced), "coverage": stats}
 
 
-# --------------------------------------------------------------------------- #
-# Compose the tileset image.
-# --------------------------------------------------------------------------- #
 def build_image(elf: Elf, nes_rgb: list[int], bg_base: int, transparent: bool):
     from PIL import Image
 
@@ -288,7 +252,6 @@ def build_image(elf: Elf, nes_rgb: list[int], bg_base: int, transparent: bool):
     img = Image.new("RGBA", (16 * 16, 16 * 16), (0, 0, 0, 0))
     px = img.load()
 
-    # Corner -> (cell-x, cell-y) origin within the 16x16 metatile.
     corners = ((0, 0), (8, 0), (0, 8), (8, 8))  # UL, UR, BL, BR
 
     nonblank = 0
@@ -307,7 +270,6 @@ def build_image(elf: Elf, nes_rgb: list[int], bg_base: int, transparent: bool):
                         continue  # leave fully transparent
                     if cidx != 0:
                         any_opaque = True
-                    # Faithful to the renderer: paletteRAM[pal*4 + cidx].
                     nes_index = bgcolours[pal * 4 + cidx] & 0x3F
                     argb = nes_rgb[nes_index]
                     rgba = (
@@ -335,7 +297,6 @@ def write_tsx(path: Path, png_name: str, scale: int) -> None:
     )
 
 
-# --------------------------------------------------------------------------- #
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -396,7 +357,6 @@ def main() -> int:
     if not args.no_tsx:
         write_tsx(args.out_tsx, args.out_png.name, args.scale)
 
-    # Report what happened -- coverage makes stale metatile ids obvious.
     print(f"elf          : {elf_path}")
     print(f"palette      : {'nes_rgb[] from ' + str(args.video_cpp) if nes_rgb is not FALLBACK_NES_RGB else 'embedded fallback'}")
     cov = stats["coverage"]

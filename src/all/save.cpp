@@ -1,42 +1,12 @@
 /**
  * @file save.cpp
- * @brief The weak "no save device here" answer every target links against
- *        until a real backend overrides it.
+ * @brief Weak "no save device here" answers, overridden by any real backend.
  *
- * WHY THIS EXISTS. pnes/save.hpp declares the save API on EVERY target, so a
- * game writes one flow with no #ifdef in it -- but only two backends exist
- * (src/ogc/save.cpp for the GameCube memory card, and the MMC3 battery path in
- * src/nes/mappers/mmc3.cpp). Without this file the other eleven platform
- * families would compile a call to ::save::Save perfectly happily and then
- * fail at LINK with an undefined symbol, which is the worst place to find out:
- * a portable game is correct, and the error names a mangled symbol in a library
- * the author did not write.
- *
- * WEAK, NOT A #ifdef CHAIN. The same weak/strong arrangement
- * ::video::DetectRefresh already uses (src/all/video.cpp:54 is the weak false,
- * and src/nes, src/ogc, src/wiiu and src/ps3 each define a strong one): a
- * backend that can really save defines these NON-weak in its own translation
- * unit and the linker prefers it, so nothing here has to know which targets
- * those are. Adding a backend means writing it, not editing this file.
- *
- * save::no_device, NOT save::missing OR save::found, and the distinction
- * matters to a player rather than to a programmer:
- *   - no_device  -- "there is nowhere to save on this system". True here.
- *   - missing    -- "there is somewhere, and this game's save is not on it",
- *                   which would invite a game to offer to CREATE one, and
- *                   ::CreateSave would then refuse it too. A loop of "no save
- *                   found, shall I make one?" / "no".
- *   - found      -- would tell a game its data is safe. It is not; there is
- *                   nowhere for it to have gone.
- * It is also one of the three codes save.hpp declares unconditionally -- every
- * code past ::no_device is gated behind TARGET_GC -- so it is the most specific
- * answer this file is able to give on an arbitrary target.
- *
- * `done` IS TRUE ON EVERY ONE, and that is not decoration. A caller's
- * `while (!response.done)` loop has nothing to wait for and must terminate on
- * its first turn; `{ }` would zero-initialise `done` to false and hang forever.
- * The `path` member (absent on NES) is left null by the designated initialisers,
- * which is what "there is no save and nowhere for one to be" means.
+ * save.hpp declares the API on every target so a game needs no #ifdef; without
+ * these a target with no backend would fail at link. Weak rather than an #ifdef
+ * chain, so adding a backend means writing it, not editing this file. Every
+ * answer is no_device with done true -- missing would invite a game to offer to
+ * create a save we would then refuse.
  */
 #include <pnes/save.hpp>
 
@@ -47,36 +17,17 @@ __attribute__((weak)) Response Load(void*, const std::size_t) { return { .done =
 __attribute__((weak)) Response Load(void*, const std::size_t, const Response*) { return { .done = true, .err = no_device }; }
 __attribute__((weak)) Response CreateSave(const void*, const std::size_t, const Response*) { return { .done = true, .err = no_device }; }
 
-// A finished search with nowhere to have looked.
 __attribute__((weak)) Response GetSaveLocation() { return { .done = true, .err = no_device }; }
 
-// Nothing to remove, because nothing could ever have been written: every call
-// here refuses before it touches anything, so there is no save to destroy and
-// no medium to destroy it on. ::no_device rather than ::missing, matching the
-// rest of this file -- the honest content is that there is nowhere, not that
-// somewhere was empty.
 __attribute__((weak)) Response Delete() { return { .done = true, .err = no_device }; }
 
-// The GameCube's directory entry has no counterpart anywhere else: these two
-// move a card_stat, which only a memory card has. A target with no card has
-// nothing to read and nothing to state.
 __attribute__((weak)) Response GetMetaData(void*) { return { .done = true, .err = no_device }; }
 __attribute__((weak)) Response SetMetaData(const void*) { return { .done = true, .err = no_device }; }
 
-// NO BITS SET, which is the honest answer and not a placeholder: this file is
-// linked where nothing can save at all, so no device is accessible and none
-// ever becomes accessible. A game that polls this before drawing a slot picker
-// draws none, and the call that could have contradicted that answers
-// ::no_device below for every index it is asked about.
 __attribute__((weak)) u8 AccessibleDevices() { return 0; }
 
-// Every index is past the last one when there are none, so there is no bounds
-// check to write: the answer is the same for 0 as for 200.
 __attribute__((weak)) Response GetDeviceStatus(u8) { return { .done = true, .err = no_device }; }
 
-// A subset of a mask with no bits in it. Nothing is accessible here, so nothing
-// can be free, and no size makes that different -- there is no sweep to run and
-// no first call to wait through: this answer is the settled one.
 __attribute__((weak)) u8 FreeDevices(const std::size_t) { return 0; }
 
 }

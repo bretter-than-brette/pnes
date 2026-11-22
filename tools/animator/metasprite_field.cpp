@@ -13,28 +13,15 @@
 
 namespace {
 
-/// The field is the editing surface, so it is drawn at twice the sheet's zoom
-/// -- the sheet is for picking tiles out of a long list, this is for placing
-/// them precisely.
 constexpr int kFieldZoomFactor = 2;
 
-/// Grid lines, dark enough not to compete with the art but visible against
-/// palette index 0 (black).
 const QColor kGridColour(0x30, 0x30, 0x30);
 
-/// Field border, a touch brighter than the grid so the extent is obvious.
 const QColor kBorderColour(0x60, 0x60, 0x60);
 
 QString formatId(int id, int patternByte, int heightTiles) {
-    // Nothing placeable is unnumbered -- an unnumbered cell is refused at the
-    // pick -- but a field rebuilt against a manifest whose frames have since
-    // moved can hold one, and showing it is better than printing $ffffffff.
     if (id == chr::kNoId) return QString("unnumbered");
 
-    // An 8x16 sprite occupies the even id and the next one, and the byte that
-    // selects the pair carries the pattern-table half on top of that -- all
-    // three are worth showing, since the id pair is the art and the OAM byte is
-    // what the export writes.
     return heightTiles == 2
         ? QString("$%1-$%2, OAM $%3")
               .arg(id, 2, 16, QChar('0'))
@@ -43,11 +30,6 @@ QString formatId(int id, int patternByte, int heightTiles) {
         : QString("$%1").arg(id, 2, 16, QChar('0'));
 }
 
-/// The sprite's art with its mirroring applied.
-///
-/// Mirrored on demand rather than stored: a tile is 64 or 128 pixels, a
-/// metasprite is a handful of them, and keeping only the unmirrored art means
-/// cycling the mirror never touches the image the brush handed over.
 QImage mirrored(const PlacedSprite& sprite) {
     const int bits = static_cast<int>(sprite.mirror);
     if (bits == 0) return sprite.image;
@@ -69,15 +51,11 @@ QString mirrorName(const Mirror mirror) {
 
 MetaspriteField::MetaspriteField(int zoom, QWidget* parent)
     : QWidget(parent), zoom_(std::max(1, zoom) * kFieldZoomFactor) {
-    // Palette index 0, so the field's backdrop matches what the PPU shows
-    // behind a sprite rather than the desktop theme's window colour.
     setAutoFillBackground(true);
     QPalette pal = palette();
     pal.setColor(QPalette::Window, QColor(table_[0]));
     setPalette(pal);
 
-    // Slot coordinates are reported on hover, which needs move events without
-    // a button held down.
     setMouseTracking(true);
 }
 
@@ -103,7 +81,6 @@ int MetaspriteField::renameFrame(const QString& from, const QString& to) {
         sprite.frame = to;
         ++moved;
     }
-    // Nothing is redrawn: a frame name is provenance, not pixels.
     return moved;
 }
 
@@ -124,7 +101,6 @@ bool MetaspriteField::addSprite(const chr::Cell& cell, const QString& entry,
     sprite.tile        = cell.tileInInclude;
     sprite.image       = cellImage(cell, table_);
 
-    // One sprite per slot, as when stamping.
     if (const int existing = spriteAt(QPoint(col, row)); existing >= 0) {
         sprites_.erase(sprites_.begin() + existing);
     }
@@ -137,7 +113,6 @@ bool MetaspriteField::addSprite(const chr::Cell& cell, const QString& entry,
 void MetaspriteField::setPaletteTable(const QVector<QRgb>& table) {
     table_ = table;
 
-    // The field's backdrop follows index 0, same as the sheet's.
     QPalette pal = palette();
     pal.setColor(QPalette::Window, QColor(table_[0]));
     setPalette(pal);
@@ -156,8 +131,6 @@ int MetaspriteField::slotHeightPx() const {
 void MetaspriteField::setTileMode(const chr::TileMode mode) {
     if (mode == mode_) return;
     mode_ = mode;
-    // Every slot changed height, so the widget's extent did too -- and the
-    // sprites, which are stored by slot, come along for free.
     updateGeometry();
     resize(sizeHint());
     update();
@@ -209,8 +182,6 @@ QImage MetaspriteField::render() const {
     const int height = tilesY_ * slotHeightPx();
 
     QImage image(width, height, QImage::Format_RGB32);
-    // Index 0 of the palette is the backdrop a sprite shows through, so that is
-    // what the gaps are.
     image.fill(table_[0]);
 
     QPainter painter(&image);
@@ -241,9 +212,6 @@ void MetaspriteField::paintEvent(QPaintEvent* event) {
     const QRect field(0, 0, sizeHint().width(), sizeHint().height());
 
     for (const PlacedSprite& sprite : sprites_) {
-        // The art is drawn at the TOP of its slot: an 8x8 cell left over in
-        // 8x16 mode (an include whose tiles do not pair up) fills half a slot,
-        // and the top is where the PPU would put it.
         const QRect slot = slotRect(QPoint(sprite.col, sprite.row));
         const QRect target(slot.left(), slot.top(),
                            sprite.image.width() * zoom_, sprite.image.height() * zoom_);
@@ -252,9 +220,6 @@ void MetaspriteField::paintEvent(QPaintEvent* event) {
         }
     }
 
-    // Grid over the art, not under it: a sprite's own black pixels are
-    // indistinguishable from the backdrop, so the lines are the only thing
-    // showing where one sprite ends and the next begins.
     painter.setPen(QPen(kGridColour, 1));
     for (int x = 1; x < tilesX_; ++x) {
         const int px = x * chr::kTilePixels * zoom_;
@@ -269,7 +234,6 @@ void MetaspriteField::paintEvent(QPaintEvent* event) {
     painter.setBrush(Qt::NoBrush);
     painter.drawRect(field.adjusted(0, 0, -1, -1));
 
-    // The slot the next stamp would land in.
     if (hovered_) {
         painter.setPen(QPen(QColor(0xFF, 0xFF, 0xFF), 1));
         painter.drawRect(slotRect(*hovered_).adjusted(0, 0, -1, -1));
@@ -284,8 +248,6 @@ std::optional<QPoint> MetaspriteField::slotAt(const QPoint& pos) const {
 }
 
 int MetaspriteField::spriteAt(const QPoint& slot) const {
-    // Back to front: the last placed sprite is the one drawn on top, so it is
-    // the one a click acts on.
     for (int i = static_cast<int>(sprites_.size()) - 1; i >= 0; --i) {
         const PlacedSprite& sprite = sprites_[static_cast<std::size_t>(i)];
         if (sprite.col == slot.x() && sprite.row == slot.y()) return i;
@@ -334,9 +296,6 @@ void MetaspriteField::mousePressEvent(QMouseEvent* event) {
     }
 
     switch (event->button()) {
-        // Right-click steps the slot's mirroring: none -> V -> H -> H+V and
-        // back round, modulo kMirrorModes. It acts on what is already there,
-        // so an empty slot has nothing to cycle.
         case Qt::RightButton: {
             const int index = spriteAt(*slot);
             if (index < 0) {
@@ -351,7 +310,6 @@ void MetaspriteField::mousePressEvent(QMouseEvent* event) {
             return;
         }
 
-        // Erasing moved here when right-click took over mirroring.
         case Qt::MiddleButton: {
             if (const int index = spriteAt(*slot); index >= 0) {
                 sprites_.erase(sprites_.begin() + index);
@@ -387,8 +345,6 @@ void MetaspriteField::mousePressEvent(QMouseEvent* event) {
     sprite.tile        = brush_->tile;
     sprite.image       = brush_->image;
 
-    // One sprite per slot: a stamp replaces whatever was in it. Mirroring is
-    // not carried over, since the new tile is a different tile.
     if (const int existing = spriteAt(*slot); existing >= 0) {
         sprites_.erase(sprites_.begin() + existing);
     }
@@ -402,7 +358,6 @@ void MetaspriteField::mousePressEvent(QMouseEvent* event) {
 void MetaspriteField::mouseMoveEvent(QMouseEvent* event) {
     const auto slot = slotAt(event->pos());
     if (slot != hovered_) {
-        // Both the old and the new slot need their outline redrawn.
         for (const auto& which : {hovered_, slot}) {
             if (which) update(slotRect(*which));
         }

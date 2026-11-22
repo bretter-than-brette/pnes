@@ -22,10 +22,6 @@ MetaspritePage::MetaspritePage(int zoom, PaletteStore* palettes, QWidget* parent
     auto* form = new QFormLayout(attributes);
 
     name_ = new QLineEdit(attributes);
-    // The name is the .msprite filename and the tab label, so it is an
-    // attribute of the metasprite rather than something the window owns. It is
-    // also the generated class's name, so it is held to a C++ identifier the
-    // same way a frame name is.
     name_->setValidator(identifierValidator(name_));
     connect(name_, &QLineEdit::textChanged, this, &MetaspritePage::nameChanged);
     connect(name_, &QLineEdit::textChanged, this, &MetaspritePage::dirtied);
@@ -42,9 +38,6 @@ MetaspritePage::MetaspritePage(int zoom, PaletteStore* palettes, QWidget* parent
 
     derived_ = new QLabel(attributes);
 
-    // Palette is per metasprite, not per frame: an animation recolouring
-    // halfway through is not something the hardware does for free, and it is
-    // not what a frame is for.
     palette_ = new QComboBox(attributes);
     connect(palette_, &QComboBox::currentIndexChanged, this, [this] {
         applyPalette();
@@ -60,10 +53,6 @@ MetaspritePage::MetaspritePage(int zoom, PaletteStore* palettes, QWidget* parent
     connect(width_, &QSpinBox::valueChanged, this, &MetaspritePage::applySize);
     connect(height_, &QSpinBox::valueChanged, this, &MetaspritePage::applySize);
 
-    // The preview plays the animation these frames describe -- the playback
-    // rules (order, the last frame looping, a timer of 0 stopping) are recorded
-    // in the format and executed nowhere else, so this is the only way to see
-    // whether an animation reads right.
     auto* previewBox = new QGroupBox("Preview", this);
     preview_ = new AnimationPreview(zoom_, previewBox);
 
@@ -71,7 +60,6 @@ MetaspritePage::MetaspritePage(int zoom, PaletteStore* palettes, QWidget* parent
     play_->setText("Play");
     play_->setCheckable(true);
     connect(play_, &QToolButton::toggled, this, [this](bool on) { preview_->setPlaying(on); });
-    // Playback can also stop on its own, on a frame whose timer is 0.
     connect(preview_, &AnimationPreview::playingChanged, this, [this](bool playing) {
         const QSignalBlocker blocked(play_);
         play_->setChecked(playing);
@@ -106,8 +94,6 @@ MetaspritePage::MetaspritePage(int zoom, PaletteStore* palettes, QWidget* parent
     frames_->setTabPosition(QTabWidget::South);  // distinguishes them from the metasprite tabs above
     connect(frames_, &QTabWidget::tabCloseRequested, this, [this](int index) { closeFrame(index); });
 
-    // Adding a frame needs to be visible, not just a menu item: the "+" sits
-    // on the frame tab bar itself, where the tabs it adds to are.
     auto* addFrame = new QToolButton(frames_);
     addFrame->setText("+");
     addFrame->setToolTip("New frame (Ctrl+T)");
@@ -123,9 +109,6 @@ MetaspritePage::MetaspritePage(int zoom, PaletteStore* palettes, QWidget* parent
         }
     });
 
-    // Attributes and preview share the top row: the attribute form does not
-    // need the full width, and the preview wants to be visible while frames are
-    // edited below it.
     auto* top = new QHBoxLayout;
     top->addWidget(attributes, 1);
     top->addWidget(previewBox, 0);
@@ -139,12 +122,8 @@ MetaspritePage::MetaspritePage(int zoom, PaletteStore* palettes, QWidget* parent
     }
     refreshPalettes();
 
-    // Any change a save would record is also a change the preview should show,
-    // so it follows the same signal the window's dirty flag does.
     connect(this, &MetaspritePage::dirtied, this, &MetaspritePage::refreshPreview);
 
-    // An animation with no frames is not useful to look at, so one is made up
-    // front -- the same reasoning as the window opening with one metasprite.
     newFrame();
     refreshDerived();
 }
@@ -169,13 +148,10 @@ QString MetaspritePage::name() const {
 }
 
 void MetaspritePage::setName(const QString& name) {
-    // setText bypasses the validator, so a load is folded here -- see
-    // ::identifierSafe.
     name_->setText(identifierSafe(name));  // textChanged carries it on to the tab label
 }
 
 QString MetaspritePage::paletteName() const {
-    // Index 0 is the placeholder entry, which is no palette at all.
     return palette_->currentIndex() <= 0 ? QString() : palette_->currentText();
 }
 
@@ -194,12 +170,9 @@ void MetaspritePage::refreshPalettes() {
         if (palettes_) palette_->addItems(palettes_->names());
 
         const int index = wanted.isEmpty() ? 0 : palette_->findText(wanted);
-        // A palette that has been deleted leaves the metasprite on the
-        // placeholder rather than on whichever name took its place.
         palette_->setCurrentIndex(index >= 0 ? index : 0);
     }
 
-    // The colours themselves may have changed even when the list has not.
     applyPalette();
 }
 
@@ -213,16 +186,11 @@ void MetaspritePage::applyPalette() {
 }
 
 void MetaspritePage::setSize(const int tilesX, const int tilesY) {
-    // The spin boxes are the source of truth, so go through them -- their
-    // valueChanged does the rest. Blocked individually so a two-axis resize
-    // only reaches the fields once.
     {
         const QSignalBlocker blockWidth(width_);
         width_->setValue(tilesX);
     }
     height_->setValue(tilesY);
-    // A height that was already correct emits nothing, so the width change
-    // still has to be applied.
     applySize();
 }
 
@@ -232,9 +200,6 @@ MetaspriteFrame* MetaspritePage::appendFrame() {
 }
 
 void MetaspritePage::clearFrames() {
-    // Used by a load to empty a page it just made, so it goes round closeFrame
-    // -- there is nothing to confirm, and a prompt here would appear while a
-    // project is opening.
     while (frames_->count() > 0) {
         auto* frame = qobject_cast<MetaspriteFrame*>(frames_->widget(0));
         frameList_.erase(std::remove(frameList_.begin(), frameList_.end(), frame), frameList_.end());
@@ -265,8 +230,6 @@ void MetaspritePage::adopt(MetaspriteFrame* frame) {
     frameList_.push_back(frame);
 
     connect(frame, &MetaspriteFrame::statusChanged, this, [this, frame](const QString& text) {
-        // Only the visible frame talks to the status bar; a background frame
-        // emitting on its way out would otherwise overwrite the message.
         if (frames_->currentWidget() == frame) emit statusChanged(text);
     });
     connect(frame, &MetaspriteFrame::nameChanged, this, [this, frame] {
@@ -299,8 +262,6 @@ void MetaspritePage::closeFrame(int index) {
     auto* frame = qobject_cast<MetaspriteFrame*>(frames_->widget(index));
     if (!frame) return;
 
-    // Closing a frame discards its sprites, and nothing undoes it -- so a frame
-    // with work in it asks first. An empty one closes without the interruption.
     if (frame->field()->spriteCount() > 0) {
         const auto answer = QMessageBox::question(
             this, "Close frame",
@@ -345,8 +306,6 @@ void MetaspritePage::applySize() {
     tilesX_ = width_->value();
     tilesY_ = height_->value();
 
-    // Frames of one animation are the same size by definition, so the extent
-    // goes to all of them -- each drops whatever no longer fits and says so.
     for (MetaspriteFrame* frame : frameList_) {
         frame->field()->setFieldSize(tilesX_, tilesY_);
         frame->field()->resize(frame->field()->sizeHint());
@@ -367,8 +326,6 @@ void MetaspritePage::refreshPreview() {
 }
 
 void MetaspritePage::refreshDerived() {
-    // What the tile extent works out to on screen, and what one slot is -- the
-    // only place the 8x8/8x16 distinction shows up in a metasprite's own terms.
     const int slotPx = mode_ == chr::TileMode::Size8x16 ? chr::kTilePixels * 2 : chr::kTilePixels;
     derived_->setText(QString("%1 x %2  (one tile is 8x%3)")
                           .arg(tilesX_ * chr::kTilePixels)
@@ -379,8 +336,6 @@ void MetaspritePage::refreshDerived() {
 void MetaspritePage::retitle(MetaspriteFrame* frame) {
     const int index = frames_->indexOf(frame);
     if (index < 0) return;
-    // An all-whitespace name would leave an unclickable tab, so the tab falls
-    // back to the frame's id while the field is empty.
     const QString name = frame->frameName().trimmed();
     frames_->setTabText(index, name.isEmpty() ? QString("frame_%1").arg(frame->frameId()) : name);
 }

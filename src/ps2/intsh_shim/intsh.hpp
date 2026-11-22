@@ -1,37 +1,17 @@
 /**
  * @file intsh.hpp
- * @brief PS2-only stand-in for the real `intsh` single-header dependency
- *        (FetchContent'd for every other platform).
+ * @brief PS2-only stand-in for the real `intsh` dependency, which every other
+ *        platform FetchContents.
  *
- * Every shared engine header (video.hpp, input.hpp, audio.hpp, technology.hpp,
- * types.hpp, ...) unconditionally does `#include <intsh>; using namespace
- * br0::intsh;`, unchanged on every platform including this one -- this file
- * is what makes that safe for PS2, not any `#ifdef` in those headers.
+ * ps2sdk's tamtypes.h already typedefs u8/u16/u32/u64/s8..s64 as global
+ * typedefs, and internal.hpp includes it before any engine header. If the real
+ * intsh also aliased those names through a `using namespace`, both would be
+ * visible unqualified at once -- which C++ treats as ambiguous even though they
+ * denote the same type, and which breaks tamtypes.h's own body too.
  *
- * ps2sdk's own tamtypes.h already typedefs u8/u16/u32/u64/s8/s16/s32/s64 as
- * ordinary global typedefs (every gsKit/libpad/audsrv signature is declared
- * in those exact names), and src/ps2/internal.hpp includes it before any
- * engine header. If the real intsh.hpp also aliased those same names via a
- * `using namespace` directive, both would be visible unqualified at once --
- * C++ treats that as ambiguous even though they denote the identical
- * underlying type, and not just at the point of use: tamtypes.h's OWN body
- * references e.g. `u32` unqualified internally, so the ambiguity breaks
- * ps2sdk's headers too, not just this project's.
- *
- * So this shim provides ONLY the names tamtypes.h does NOT already have --
- * intsh's signed i8/i16/i32/i64 (tamtypes.h's own signed names are spelled
- * s8/s16/s32/s64 instead; the engine actually spells real types with `i16` --
- * src/3ds/video.cpp's Cell/BandRec, and the sample buffers in every audio
- * backend) -- and
- * deliberately leaves out u8/u16/u32/u64/s8/s16/s32/s64 and the fast/least
- * variants (if8.../uf8.../il8.../ul8...), none of which the engine uses
- * beyond what tamtypes.h already covers.
- *
- * Wired in by putting this directory on the include path AHEAD of the
- * fetched intsh's (target_include_directories(... BEFORE ...) in the ps2
- * branch of CMakeLists.txt) so `#include <intsh>` resolves here instead --
- * no FetchContent of the real dependency happens for TARGET_PLATFORM=ps2 at
- * all.
+ * So this provides only the names tamtypes.h lacks: intsh's signed i8..i64. It
+ * wins by being on the include path ahead of the fetched intsh, and no
+ * FetchContent happens for this target at all.
  */
 #pragma once
 

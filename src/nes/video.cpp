@@ -2,26 +2,8 @@
 #include <pnes/technology.hpp>
 #include <pnes/interrupts.hpp>
 
-// WHERE THIS MODULE'S CODE GOES -- the consuming project's choice, supplied as
-// PNES_VIDEO_SECTION. Optional, unlike audio's: unset means the default,
-// everything inlined into callers and placed nowhere in particular.
-//
-// VIDEO_BANK tags every definition that may move. ::AI tags the ones that must
-// NOT: anything an interrupt handler reaches pays argument marshalling plus
-// jsr/rts inside a budget of one vblank or one scanline, and a placed module
-// adds a bank switch on top. Which functions those are is a property of the
-// CALLER, so the pinned set is what a project can plausibly call from an NMI or
-// IRQ -- the scroll helpers, the name/attribute-table writers, RefreshSprites.
-//
-// The two are mutually exclusive, and ::AI alone is the whole answer. A section
-// cannot place an inlined function, and in the one case where it could -- taking
-// its address forces an out-of-line copy -- landing that copy in the banked
-// section is precisely wrong, since the pin exists to keep it reachable without
-// banking. So pinned functions carry no section at all.
-//
-// Pinning is free at present: LTO inlines all of them anyway. It only stops the
-// inliner from deciding otherwise later, where the failure is an overrun with no
-// diagnostic.
+// Every function here is placed in the project's own video bank where one is
+// configured; see technology.hpp's MODULE_PLACEMENT for why that costs inlining.
 #ifdef PNES_VIDEO_SECTION
 #define VIDEO_BANK MODULE_PLACEMENT(PNES_VIDEO_SECTION)
 #else
@@ -70,11 +52,6 @@ static u16 xy_to_at_addr(const u16 x, const u16 y) {
 
 namespace video {
 
-// Spins on ::irq::nmi_done, which every ::NMI vector sets true right after
-// its body returns (see that macro's own doc comment), then clears it --
-// so this blocks until exactly one more NMI has run, giving NES the same
-// "wait for the next VBlank to be presented" semantics ::WaitForPresent
-// already has on desktop, with no per-mode done-flag required.
 VIDEO_BANK void WaitForPresent() {
     while (!irq::nmi_done) {}
     irq::nmi_done = false;
@@ -89,14 +66,6 @@ VIDEO_BANK void EnableRendering(const u8 ppuCtrl_, const u8 ppuMask_) {
     PPUMASK = ppuMask_;
 }
 
-// Weak default: flushes the 2 KiB of physical CIRAM every ordinary
-// (non-four-screen) mirroring mode aliases across the full $2000-$2FFF
-// nametable range. A board wired for four-screen mirroring exposes a full
-// 4 KiB of distinct physical storage instead -- no mirroring left to make 2
-// pages implicitly cover all 4 logical nametables -- so its own mapper TU
-// (see src/nes/mappers/mmc3.cpp's ALTERNATIVE_NAMETABLE build) supplies a
-// strong override that walks all 4 pages. Resolved at link time, same idiom
-// as the emu backend's ppu::ReadNametable/WriteNametable (src/emu/ppu.cpp).
 __attribute__((weak))
 VIDEO_BANK void Flush(const u8 nt, const u8 at) {
     tech::peek(raw::PPUSTATUS);
@@ -120,22 +89,11 @@ VIDEO_BANK void Flush(const u8 nt, const u8 at) {
     }
 }
 
-// Pinned: a raster split writes the scroll at an exact dot, so anything added
-// in front of these writes moves the split.
 __attribute__((hot))
 AI void SetScroll(const vec2<u16> pos) {
     const u16 x = pos.x;
     u16 y = pos.y;
 
-    // Wraps y Past one nametable's height (240) into the next one, tagging
-    // bit 0x100 so the nt-bit derivation below picks it up (y >> 7 & 0x02
-    // reads out exactly that tag). This used to run twice unconditionally:
-    // the first pass's tag (y |= 0x100, via XOR against an already-clear
-    // bit) makes y >= 240 true again on its own, so the second copy fired
-    // every time the first one did too, re-subtracting 240 and re-toggling
-    // the tag back off -- e.g. y=240 (exactly one nametable down) came out
-    // as final y=16 with the tag lost, instead of the intended y=0 with the
-    // nametable-select bit correctly set.
     if (y >= 240) {
         y -= 240;
         y ^= 0x100;
@@ -144,55 +102,30 @@ AI void SetScroll(const vec2<u16> pos) {
     const auto nt = x >> 8 & 0x01
                | y >> 7 & 0x02;
 
-    // Kept in step even though the nametable select now travels to the PPU via
-    // $2006 below, not $2000: a $2000 write copies its low 2 bits into t's
-    // nametable field, so any LATER PPUCTRL write (the POLARITY flip in the
-    // nametable writers, a sprite-size change) would otherwise re-assert a
-    // STALE select over the one this call just latched.
     PPUCTRL = PPUCTRL & 0xFC | nt;
 
-    // The four-write sequence ($2006/$2005/$2005/$2006), which sets the whole
-    // scroll -- X AND Y -- and has it take effect immediately, mid-frame.
+    // The four-write sequence ($2006/$2005/$2005/$2006), which sets X and Y
+    // and takes effect immediately, mid-frame. The plain two-$2005 form could
+    // not do Y: $2005 only stages t, and t's vertical bits do not reach v until
+    // the next pre-render line. The one write that copies t into v is the SECOND
+    // $2006, and it carries only t's low byte -- so the high bits have to be
+    // staged first and the low byte must land last. Hence four writes, in this
+    // order and no other.
     //
-    // The plain two-$2005 form this replaced could not do Y: $2005 only stages
-    // t, and t's vertical bits do not reach v until the next frame's pre-render
-    // line (dots 280-304), so a mid-frame Y write was a no-op for the rest of
-    // that frame. X was unaffected, which is why X-only splits worked. The ONLY
-    // write that copies t into v is the SECOND $2006 write -- and it carries
-    // just t's low byte, so the high bits (fine Y, nametable select, coarse Y's
-    // top 2 bits) must be staged first and the low byte must land last. Hence
-    // four writes, in this order and no other.
-    //
-    // Resets the write toggle first. The sequence is positional -- it depends
-    // on w being 0 on entry -- and unlike the old form, entering at w == 1 does
-    // not merely scramble the scroll until the next call: the leading $2006
-    // would be taken as a SECOND write and latch a bogus v on the spot.
+    // $2002 resets the write toggle first: the sequence is positional, and
+    // entering at w == 1 makes the leading $2006 latch a bogus v on the spot.
     tech::peek(raw::PPUSTATUS);
 
-    // 1. $2006: nametable select into t's NN field, and zero fine Y and coarse
-    //    Y's high 2 bits -- all three are re-supplied by write 2.
     tech::poke(raw::PPUADDR, static_cast<u8>(nt << 2));
 
-    // 2. $2005 with w == 1, so this is the SECOND scroll write: fine Y
-    //    (y & 7) and coarse Y (y >> 3).
     tech::poke(raw::PPUSCROLL, static_cast<u8>(y & 0xFF));
 
-    // 3. $2005 with w == 0, so this is the FIRST scroll write: coarse X
-    //    (x >> 3), plus fine X into the separate x register -- the only write
-    //    that can set fine X at all.
     tech::poke(raw::PPUSCROLL, static_cast<u8>(x & 0xFF));
 
-    // 4. $2006, SECOND write: t's low byte -- coarse Y's low 3 bits in 7:5,
-    //    coarse X in 4:0 -- and then v = t, which is what makes the whole
-    //    thing land now rather than next frame.
-    //
-    //    Not redundant with writes 2 and 3; it is the same coarse X/Y
-    //    re-expressed in t's low byte, which is all this write can reach. The
-    //    cast is load-bearing: (y & 0xF8) << 2 is only equal to coarse Y's low
-    //    3 bits in 7:5 AFTER truncation to 8 bits (y's bits 5-7 shift out), and
-    //    C++ promotes the u16 operand instead of wrapping it. The two halves
-    //    cannot collide -- << 2 of a value with its low 3 bits clear leaves
-    //    bits 0-4 clear, exactly where coarse X goes.
+    // v = t, which is what makes the whole thing land now. Not redundant with
+    // the two writes above -- it is the same coarse X/Y re-expressed in t's low
+    // byte. The cast is load-bearing: (y & 0xF8) << 2 only equals coarse Y's low
+    // 3 bits in 7:5 AFTER truncation to 8 bits, and C++ would promote instead.
     tech::poke(raw::PPUADDR,
                static_cast<u8>((y & 0xF8) << 2 | (x & 0xFF) >> 3));
 }
@@ -221,10 +154,6 @@ AI void WriteFromBufferToNameTable(
     WriteFromBufferToNameTable(xy_to_nt_addr(pos.x, pos.y), source, sBuffer, polarity);
 }
 
-// Address overload: the caller already projected (x,y) -> a $2000-based PPU address
-// (via CartesianToAddress), so this skips xy_to_nt_addr entirely -- just the latch
-// reset and three pokes. Meant for the vblank window, where the divide/modulo in the
-// (x,y) form is the cost worth hoisting out.
 __attribute__((hot))
 AI void WriteRepeatedToNameTable(
     const u16 address, const u8 value, const u8 amt, const u8 polarity
@@ -280,8 +209,6 @@ VIDEO_BANK void WriteFromProviderToNameTable(
     }
 }
 
-// Explicit instantiations for the provider index types in use. The body pokes
-// PPU registers, so it must stay in this backend rather than the header.
 template void WriteFromProviderToNameTable<u8>(u16, u8 (*)(u8), u8, u8);
 template void WriteFromProviderToNameTable<u16>(u16, u8 (*)(u16), u8, u8);
 
@@ -293,8 +220,6 @@ VIDEO_BANK void WriteFromProviderToNameTable(
     WriteFromProviderToNameTable(xy_to_nt_addr(pos.x, pos.y), fn, amt, polarity);
 }
 
-// Explicit instantiations for the provider index types in use. The body pokes
-// PPU registers, so it must stay in this backend rather than the header.
 template void WriteFromProviderToNameTable<u8>(vec2<u16>, u8 (*)(u8), u8, u8);
 template void WriteFromProviderToNameTable<u16>(vec2<u16>, u8 (*)(u16), u8, u8);
 
@@ -305,10 +230,6 @@ AI void WriteFromBufferToAttributeTable(
     PPUCTRL = PPUCTRL & ~ctrl::POLARITY;
 
     if (polarity) {
-        // AT rows for the same tile column are 8 bytes apart.  Re-address each
-        // byte explicitly (peek PPUSTATUS + 2 pokes = 12 cycles/byte) instead of
-        // seven dummy PPUDATA reads (7×4 = 28 cycles/byte) to stride between rows.
-        // base_lo + i*8 stays ≤ $FF for sBuffer≤8 (base_lo ≤ $C7, 7×8 = $38).
         const u8 hi = static_cast<u8>(address >> 8);
         const u8 lo = static_cast<u8>(address & 0xFF);
         for (u8 i = 0; i < sBuffer; i++) {
@@ -354,11 +275,6 @@ AI void WriteFromProviderToAttributeTable(
     PPUCTRL = PPUCTRL & ~ctrl::POLARITY;
 
     if (polarity) {
-        // AT rows for the same tile column are 8 bytes apart, so re-address per
-        // byte instead of striding via PPUCTRL/PPUDATA reads. Unlike
-        // WriteFromBufferToAttributeTable's sBuffer<=8 callers, amt here can run
-        // past 8 (e.g. title::InitTitleScreen's full-height pass), so the stride
-        // is carried through a 16-bit add rather than truncated to the low byte.
         for (Idx i = 0; i < amt; ++i) {
             const u16 addr = static_cast<u16>(address + (static_cast<u16>(i) << 3));
             tech::peek(raw::PPUSTATUS);
@@ -377,8 +293,6 @@ AI void WriteFromProviderToAttributeTable(
     }
 }
 
-// Explicit instantiations for the provider index types in use. The body pokes
-// PPU registers, so it must stay in this backend rather than the header.
 template void WriteFromProviderToAttributeTable<u8>(u16, u8 (*)(u8), u8, u8);
 template void WriteFromProviderToAttributeTable<u16>(u16, u8 (*)(u16), u8, u8);
 
@@ -390,8 +304,6 @@ AI void WriteFromProviderToAttributeTable(
     WriteFromProviderToAttributeTable(xy_to_at_addr(pos.x, pos.y), fn, amt, polarity);
 }
 
-// Explicit instantiations for the provider index types in use. The body pokes
-// PPU registers, so it must stay in this backend rather than the header.
 template void WriteFromProviderToAttributeTable<u8>(vec2<u16>, u8 (*)(u8), u8, u8);
 template void WriteFromProviderToAttributeTable<u16>(vec2<u16>, u8 (*)(u16), u8, u8);
 
@@ -399,18 +311,10 @@ VIDEO_BANK u16 CartesianToAddress(const vec2<u16>& pos) {
     return xy_to_nt_addr(pos.x, pos.y);
 }
 
-// Precomputes the four bytes ::WRITE_SCROLL stores, so the raster-critical
-// window pays only the stores. Same encoding ::SetScroll performs inline --
-// see its comments for why the sequence is ordered the way it is.
 AI scroll_t CartesianToScroll(const vec2<u16> pos) {
     const u16 px = pos.x;
     auto y = pos.y;
 
-    // Single wrap, matching ::SetScroll. This used to run twice: the first
-    // pass's 0x100 tag makes y >= 240 true again by itself, so the second copy
-    // fired whenever the first did, re-subtracting 240 and clearing the tag
-    // back off -- y=240 came out as 16 with no vertical select instead of 0
-    // with it set.
     if (y >= 240) { y -= 240; y ^= 0x100; }
 
     const auto nt = static_cast<u8>(px >> 8 & 0x01 | y >> 7 & 0x02);
@@ -423,15 +327,8 @@ AI scroll_t CartesianToScroll(const vec2<u16> pos) {
     }};
 }
 
-// Writes 1-3: load t only. The PPU renders from v, so none of this shows and
-// none of it is raster-critical -- which is exactly why it is separable from
-// the latch below. Pinned (::AI) all the same: a split handler calls it.
 __attribute__((hot))
 AI void StageScroll(const scroll_t s) {
-    // Derived from data[0] (which is nt << 2) rather than carried separately,
-    // so ::scroll_t stays four bytes of pure write sequence. Same purpose as
-    // the equivalent line in ::SetScroll: keep the shadow's select bits in
-    // step so a later PPUCTRL write cannot re-assert a stale one.
     PPUCTRL = PPUCTRL & 0xFC | s.data[0] >> 2;
 
     tech::peek(raw::PPUSTATUS);   // reset w; the sequence is positional
@@ -440,9 +337,6 @@ AI void StageScroll(const scroll_t s) {
     tech::poke(raw::PPUSCROLL, s.data[2]);
 }
 
-// Write 4: v = t. THE raster-critical store -- the scroll moves at the dot
-// this lands on, so this must stay a lone store of a precomputed byte. Do not
-// add anything to this function.
 __attribute__((hot))
 AI void LatchScroll(const scroll_t s) {
     tech::poke(raw::PPUADDR, s.data[3]);
@@ -532,63 +426,24 @@ VIDEO_BANK void video::WaitThenReactToSpriteZero(const vec2<u16> pos, void (*fn)
 }
 
 /**
- * @brief Identifies the console's video system by timing a vblank interval,
- *        and reports whether it refreshes at 50Hz.
+ * @brief Times a vblank interval to identify the console's video system.
  *
- * WHY MEASURE AT ALL: see ::video::Is50Hz (video.hpp). The
- * build cannot know which console the ROM ends up in -- a flash cart, an
- * emulator defaulting to the wrong region, a PAL console running an NTSC image
- * -- and the frame length is the ground truth for everything
- * ::demo::Framerated scales.
+ * The standard NESdev routine, and the reason to prefer it is the missed-flag
+ * case: reading $2002 clears bit 7, so a read can land exactly on the PPU
+ * setting it and lose that vblank -- and the interval measured is then TWO
+ * frames. A threshold comparison reads that as the slower console; the published
+ * counts separate the two cases instead, being distinct in Y alone ($09/$0A/$0B
+ * against $13/$15/$17), so `cmp #16` tells them apart and `lsr` folds a double
+ * onto a single. Loop is 12.005 cycles per iteration.
  *
- * THIS IS THE STANDARD NESDEV ROUTINE, not something invented here, and the
- * reason to prefer it is the MISSED-FLAG CASE. Reading $2002 clears bit 7, so a
- * read can land exactly on the PPU setting it and lose that vblank -- a known
- * hardware oversight -- and the interval measured is then TWO frames, not one.
- * A plain "count one interval and compare against a threshold" misreads that as
- * the slower console: double an NTSC count and it sails past any PAL threshold,
- * reporting 50Hz on a 60Hz machine with nothing to say so. The counts separate
- * the two cases instead of being confused by them:
+ * Dendy refreshes at 50Hz despite its NTSC-like clock, so it reports true;
+ * anything unclassified falls back to 60Hz, which is the safer wrong answer.
  *
- *   system          cycles/frame   1 vblank (Y:X)   2 vblanks (Y:X)
- *   NTSC  RP2C02      29780.67        $09B0            $1361
- *   PAL   RP2C07      33247.50        $0AD1            $15A2
- *   Dendy             35464.00        $0B8A            $1714
- *
- * All six values are distinct in Y alone -- $09/$0A/$0B against $13/$15/$17 --
- * so `cmp #16` tells the two cases apart and `lsr` folds the double onto the
- * single before classifying. Then subtracting 9 maps Y to 0/1/2 for
- * NTSC/PAL/Dendy, clipped to 3 for anything else.
- *
- * The loop is 12.005 cycles per iteration: inx 2, bne-taken 3, bit 4,
- * bpl-taken 3, plus the 13-cycle pass every 256 where X wraps and iny runs.
- *
- * DENDY AND "BAD" BOTH MATTER TO THE ANSWER. Dendy refreshes at 50Hz despite
- * its NTSC-like CPU clock, so it reports true. Anything unclassified (3) falls
- * back to 60Hz, which is the common case and the safer wrong answer -- a game
- * running 17% slow is more playable than one running 20% fast.
- *
- * POLLS PPUSTATUS, NOT NMI, because of WHEN this runs: from a global
- * constructor, ahead of ::RESET's body, so neither rendering nor the NMI enable
- * has been touched by game code. The VBlank flag is set once per frame by the
- * PPU regardless of both. Rendering being off also REMOVES jitter rather than
- * adding it -- the odd-frame short scanline only happens with rendering on.
- *
- * $2000 IS ZEROED FIRST, which the published routine does not do because it
- * assumes it runs at the top of reset. This one does not: PPUCTRL powers up
- * indeterminate and nothing before this point clears it (mmc3.cpp's ::_reset
- * writes $E000/$A001/$8000 and nothing else), so a set NMI-enable bit would
- * fire an NMI into the middle of the count and add its cycles. If this is ever
- * moved into ::_reset, note that PPU register writes in the first ~29658 cycles
- * after power-on are ignored, and the write becomes a no-op.
- *
- * RETURNS rather than assigning anything: the caller owns where the answer
- * lives. ::DetectRefreshOnBoot below is this target's one caller.
- *
- * NOT PLACED IN THE VIDEO SECTION, unlike everything above: PNES_VIDEO_SECTION
- * may be a switchable bank, and a global constructor runs from crt0 before any
- * game code has established a window. Same reasoning as mmc3.cpp's
- * SyncBankShadows, which is likewise unplaced for being boot-time-only.
+ * Polls PPUSTATUS rather than NMI because of when it runs -- from a global
+ * constructor, before game code has enabled rendering or NMI. $2000 is zeroed
+ * first, which the published routine does not do because it assumes it runs at
+ * the top of reset: PPUCTRL powers up indeterminate, and a set NMI-enable bit
+ * would fire into the middle of the count.
  */
 bool video::DetectRefresh() {
     u8 system, countLo, countHi;
@@ -618,38 +473,22 @@ bool video::DetectRefresh() {
         "bcc 5f\n\t"
         "lda #3\n\t"           // Unclassified.
         "5:"
-        // REGISTER OUTPUTS, NOT "=m", AND THAT IS LOAD-BEARING. llvm-mos
-        // expands an "=m" operand into a zero-page POINTER PAIR and addresses
-        // the variable indirectly -- for statics as much as for stack locals.
-        // `sta %0` therefore overwrites the pointer's low byte instead of the
-        // variable, and the compiler's own `lda (%0),y` then reads from
-        // wherever that mangled pointer lands. It compiles clean, it
-        // disassembles plausibly, and the value never arrives: this function
-        // returned false unconditionally, on every console, until these became
+        // Register outputs, not "=m", and that is load-bearing: llvm-mos expands
+        // an "=m" operand into a zero-page POINTER PAIR and addresses the
+        // variable indirectly, so `sta %0` overwrites the pointer's low byte
+        // instead. It compiles clean, disassembles plausibly, and the value never
+        // arrives -- this returned false on every console until these became
         // register constraints.
-        //
-        // The classification above leaves exactly what is wanted in place --
-        // A holds the system, and X/Y still hold the count, untouched since the
-        // loop -- so there is nothing to store and no operand to get wrong.
         : "=a"(system), "=x"(countLo), "=y"(countHi));
 
-    // Kept so the raw count is available to a caller that wants to log it --
-    // the only thing that separates "measured the wrong interval" from
-    // "classified it wrongly" if this is ever suspect again.
     (void)countLo;
     (void)countHi;
 
-    // 1 = PAL, 2 = Dendy. 0 = NTSC and 3 = unclassified both mean 60Hz.
     return system == 1 || system == 2;
 }
 
-/**
- * @brief Runs ::video::DetectRefresh at boot and publishes the answer, since
- *        NES's ::RESET has no ::irq::init hook to carry it (interrupts.hpp).
- *
- * Priority 102, after mmc3.cpp's SyncBankShadows at 101: that one re-syncs the
- * bank shadows ::_reset already poked, and this spins for up to two frames, so
- * there is no reason to do it with the shadows still unsynced.
- */
+/// NES's ::RESET has no irq::init hook to carry this. Priority 102, after
+/// mmc3.cpp's SyncBankShadows at 101: this spins for up to two frames, so there
+/// is no reason to do it with the bank shadows still unsynced.
 __attribute__((constructor(102)))
 static void DetectRefreshOnBoot() { video::is50Hz = video::DetectRefresh(); }

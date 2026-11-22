@@ -7,30 +7,12 @@
 #include <array>
 using namespace br0::intsh;
 
-// Expand a single base CHR-tile id into the four consecutive corner ids that
-// make up a 2x2 metatile: base (UL), base+1 (UR), base+2 (BL), base+3 (BR).
-// Drop it into the four tile slots of a row and append the AT byte yourself,
-// e.g.  MT_SPLIT(0x60), (MetatileCollision::None | 0b00),
+// Metatile tables and the collision class decode: one mask per metatile, which
+// is what lets collision_map answer without an attribute lookup.
 #define MT_SPLIT(base) (base), (base) + 1, (base) + 2, (base) + 3
 
-// Tiles are named in character-rom space and translated by the window the set
-// is banked at, so a metatile row says which art it means rather than which
-// index that art currently answers to. No `using namespace` over the entries
-// any more: each now has its own nested `lma`, so an unqualified one would be
-// ambiguous between them -- and the entry has to be named here anyway, since
-// it is what picks the window.
 
-// Single editable source of truth: one row per metatile id =
-// { UL, UR, BL, BR, AT } -- four CHR-tile ids plus the packed attribute byte.
-// The AT byte is  (MetatileCollision::Class | palette):  bits 7..2 hold the
-// collision class (see MetatileCollision in the header), bits 1..0 the 2-bit
-// PPU palette index.  Split into five 256-byte planes at compile time (see
-// below).  MetatilesSrc is constexpr-only and is NOT emitted to ROM -- only the
-// five derived planes are.
 namespace {
-// The tiles this table names, each translated once by the window its set is
-// banked at. Named rather than spelled out per slot so a metatile row stays
-// four tile names and an attribute byte.
 constexpr u8 air     = windows::staticLevelTiles  + blob::staticLevelTiles::air;
 constexpr u8 terrain = windows::staticLevelTiles  + blob::staticLevelTiles::terrain;
 constexpr u8 coin    = windows::dynamicLevelTiles + blob::dynamicLevelTiles::coin;
@@ -294,8 +276,6 @@ constexpr u8 MetatilesSrc[256 * 5] = {
     0x00, 0x00, 0x00, 0x00,    (MetatileCollision::None    | 0b00),   // $ff
 };
 
-// Pull one column out of every { UL, UR, BL, BR, AT } row into a flat 256-byte
-// plane (0=UL, 1=UR, 2=BL, 3=BR, 4=AT), so each lookup is a single `lda Plane,x`.
 constexpr std::array<u8, 256> MetatilePlane(const int plane_col) {
     std::array<u8, 256> plane{};
     for (int id = 0; id < 256; ++id) plane[id] = MetatilesSrc[id * 5 + plane_col];
@@ -303,13 +283,7 @@ constexpr std::array<u8, 256> MetatilePlane(const int plane_col) {
 }
 }   // anonymous namespace
 
-// Compile-time-split planes: four separate 256-byte .rodata tables indexed
-// directly by metatile id, so a CHR-tile fetch is a single `lda Metatiles_xx,x`
-// instead of the old 16-bit `Metatiles[id << 2 | corner]` index.
 #ifdef TARGET_NES
-// ROM source of truth, LEVEL_GRAPHICS-banked (paged, MMC3 window 2). Internal
-// linkage: only LoadMetatilePlanes() below reads these directly -- every
-// other call site goes through the RAM mirrors declared in metatiles.hpp.
 namespace {
 LEVEL_GRAPHICS constexpr std::array<u8, 256> kMetatiles_UL_rom   = MetatilePlane(0);   // top-left
 LEVEL_GRAPHICS constexpr std::array<u8, 256> kMetatiles_BL_rom   = MetatilePlane(1);   // bottom-left
@@ -318,17 +292,12 @@ LEVEL_GRAPHICS constexpr std::array<u8, 256> kMetatiles_BR_rom   = MetatilePlane
 LEVEL_GRAPHICS constexpr std::array<u8, 256> kMetatiles_ATTR_rom = MetatilePlane(4);   // collision (7..2) | palette (1..0)
 }   // anonymous namespace
 
-// RAM mirrors (PRG-RAM, via demo/link.ld's c_writeable alias) -- see the
-// comment on the extern declarations in metatiles.hpp for why these exist.
 std::array<u8, 256> Metatiles_UL{};
 std::array<u8, 256> Metatiles_BL{};
 std::array<u8, 256> Metatiles_UR{};
 std::array<u8, 256> Metatiles_BR{};
 std::array<u8, 256> Metatiles_ATTR{};
 
-// Caller must already have window 2 on LevelGraphicsBank(n) -- see levels.cpp's
-// LoadLevel, which switches there right before calling this, same convention
-// as its LoadDynamicLayer call just above it.
 void LoadMetatilePlanes() {
     Metatiles_UL   = kMetatiles_UL_rom;
     Metatiles_BL   = kMetatiles_BL_rom;
@@ -337,9 +306,6 @@ void LoadMetatilePlanes() {
     Metatiles_ATTR = kMetatiles_ATTR_rom;
 }
 #else
-// No MMC3 window off NES -- LEVEL_GRAPHICS expands to nothing (see banks.hpp),
-// so these are just ordinary always-resident rodata. No RAM mirror, no copy;
-// LoadMetatilePlanes() is declared inline as a no-op in metatiles.hpp.
 const std::array<u8, 256> Metatiles_UL   = MetatilePlane(0);
 const std::array<u8, 256> Metatiles_BL   = MetatilePlane(1);
 const std::array<u8, 256> Metatiles_UR   = MetatilePlane(2);
@@ -347,5 +313,3 @@ const std::array<u8, 256> Metatiles_BR   = MetatilePlane(3);
 const std::array<u8, 256> Metatiles_ATTR = MetatilePlane(4);
 #endif
 
-// GetMetatileCollisions is defined inline in metatiles.hpp so every call site
-// can emit a direct indexed load + mask with no JSR/RTS overhead.

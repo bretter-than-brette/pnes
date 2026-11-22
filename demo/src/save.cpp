@@ -11,23 +11,13 @@
 
 SAVEMEM SaveFile saveData;
 
-// AFTER ::saveData AND NOT BEFORE IT, which is the whole reason
-// ::PopulateSaveData is defined in this file rather than in the header. The
-// generated page declares its state as references into this very object
-// (`inline atomic u8& amount = saveData.config....`), so it needs the
-// definition above already in scope -- and it needs ::charmap_generic, which
-// save.hpp brought in.
+// The demo save file and the version stamped into it.
 #ifndef GEN_TARGET_DIR
 #error "GEN_TARGET_DIR is not set -- add it to this target's CMakeLists.txt branch."
 #endif
 #include STRCAT(../gen/options/GEN_TARGET_DIR/options.hpp)
 
 #ifdef TARGET_GC
-// THE CARD'S OWN METADATA, which is the one thing a GameCube save carries that
-// is not the game's state: the system menu draws a save with these. They live
-// beside ::PopulateSaveData because it is their only reader -- they used to sit
-// in demo/src/modes/pregame.cpp, which made a mode own the bytes that describe
-// the save rather than the save owning them.
 const OGC_BANNER_CI(banner) = {
 #embed <card/banner.ci>
 };
@@ -68,18 +58,8 @@ void PopulateSaveData() {
 
 #ifndef TARGET_NES
 save::Response SaveGame(void (* const pump)()) {
-    // Before the bytes, not after: this is what makes the file readable next
-    // boot (see this function's declaration, save.hpp).
     saveData.version = saveVersion;
 
-    // NO DEVICE PRE-CHECK, DELIBERATELY. ::save::AccessibleDevices would be
-    // the obvious guard and it is the wrong one: the weak backend every target
-    // but the GameCube still links answers 0 forever (src/all/save.cpp), and
-    // the NES battery path overrides ::save::Save without overriding that --
-    // so a pre-check would refuse to save on exactly the platforms whose save
-    // works. ::save::Save reports ::save::no_device itself when there is
-    // nowhere to write, which is the same answer one frame later and true
-    // everywhere.
     save::Response response { };
     while (response = save::Save(&saveData, sizeof(saveData)), !response.done) {
         if (pump) pump();

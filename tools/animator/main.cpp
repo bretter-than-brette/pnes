@@ -1,17 +1,9 @@
 // 'pnes' Animation Designer
 //
-// Loads a blobman manifest (tools/blobman, e.g. demo/chr/config.toml), builds a
-// table of every included tile with the PPU tile id the hardware would see
-// (chr_table.hpp), and shows it 16-across in the black-RGB placeholder palette
-// (tile_canvas.hpp) in a panel down the left of the window. Clicking a tile
-// picks it; the tabbed area beside the panel holds the metasprites
-// (metasprite_page.hpp), each of which is itself tabbed -- one tab per
-// animation frame, with its own name, timer, successor and field
-// (metasprite_frame.hpp) that stamps the pick.
-//
-// A manifest can be named on the command line (`animator demo/chr/config.toml`)
-// or opened from File -> Open Manifest...; View -> 8x16 Tiles regroups the
-// table into sprite pairs.
+// Loads a blobman manifest, builds a table of every included tile with the PPU
+// id the hardware would see, and shows it 16-across down the left of the window.
+// Clicking a tile picks it; the tabbed area beside holds the metasprites, each
+// itself tabbed one tab per animation frame.
 
 #include "chr_table.hpp"
 #include "codegen.hpp"
@@ -59,18 +51,10 @@
 
 namespace {
 
-// Reserve room for the window's own frame when sizing against the screen, as
-// uitk does -- a window requested at exactly the available height is taller
-// than what fits once its title bar and borders are added.
 constexpr int kWindowChromeMarginPx = 60;
 
-/// Fallback window height when the screen is unexpectedly tiny.
 constexpr int kMinWindowHeightPx = 320;
 
-/// Starting width for the metasprite area when a page asks for less than this
-/// -- a 1x1 or 2x2 metasprite is a very small field, and a column barely wider
-/// than its attribute section looks broken. Scaled off the sheet's zoom, which
-/// is itself derived from the monitor (so 480px at 1080p, 960px at 4K).
 constexpr int kMetaspriteAreaMinPxAt1080p = 480;
 constexpr int kZoomAt1080p = 4;
 
@@ -80,9 +64,6 @@ public:
     explicit MainWindow(int zoom) : zoom_(zoom) {
         setWindowTitle("pnes Animation Designer");
 
-        // The sheet is a permanent panel, not a document: it is where every
-        // stamp comes from, so it stays visible whichever metasprite is being
-        // worked on. Only the metasprites are tabbed.
         auto* central = new QWidget(this);
         auto* columns = new QHBoxLayout(central);
         columns->setContentsMargins(0, 0, 0, 0);
@@ -94,25 +75,14 @@ public:
         connect(canvas_, &TileCanvas::cellPicked, this, &MainWindow::pickCell);
 
         sheetScroll_ = new QScrollArea(central);
-        // The canvas is exactly 16 cells wide at a fixed zoom, so it never
-        // reflows to the viewport: keep it at its sizeHint (widgetResizable
-        // off) and let the scroll area scroll it vertically. The horizontal
-        // bar is off because the width is the one thing that always fits --
-        // the window is sized from it below.
         sheetScroll_->setWidget(canvas_);
         sheetScroll_->setWidgetResizable(false);
         sheetScroll_->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
         sheetScroll_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
         sheetScroll_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         sheetScroll_->setFrameShape(QFrame::StyledPanel);
-        // Exactly 16 cells plus its scrollbar: the canvas cannot use more
-        // width and anything less would clip a column, so the panel is that
-        // wide and the metasprite area takes the rest.
         sheetScroll_->setFixedWidth(sheetWidth());
 
-        // The sheet's palette is a VIEW setting, independent of what any
-        // metasprite uses: picking tiles is easier in the colours they will be
-        // drawn in, but the sheet is not part of any one metasprite.
         sheetPalette_ = new QComboBox(central);
         connect(sheetPalette_, &QComboBox::currentIndexChanged, this, [this] { applySheetPalette(); });
 
@@ -135,8 +105,6 @@ public:
         connect(tabs_, &QTabWidget::tabCloseRequested, this, &MainWindow::closeTab);
         connect(tabs_, &QTabWidget::currentChanged, this, &MainWindow::tabChanged);
 
-        // Same reasoning as the frame tabs' own "+": the way to add one should
-        // be where the tabs are, not only in a menu.
         auto* addMetasprite = new QToolButton(tabs_);
         addMetasprite->setText("+");
         addMetasprite->setToolTip("New metasprite (Ctrl+N)");
@@ -146,11 +114,7 @@ public:
 
         columns->addWidget(tabs_, 1);
 
-        // Palettes outlive any one metasprite, so the store is the window's and
-        // everything that draws follows it.
         connect(paletteStore_, &PaletteStore::changed, this, &MainWindow::refreshSheetPalettes);
-        // Palettes are saved in the .anim, so editing one is unsaved work like
-        // any other.
         connect(paletteStore_, &PaletteStore::changed, this, &MainWindow::markDirty);
         refreshSheetPalettes();
 
@@ -158,16 +122,8 @@ public:
         statusBar()->showMessage(summary_);
     }
 
-    /// Whether View -> 8x16 Tiles is ticked.
     void setTallTiles(bool tall) { tallTiles_->setChecked(tall); }
 
-    /**
-     * @brief Loads @p path's tiles into the sheet, reporting the outcome.
-     * @param quiet Report failures on stderr only, with no modal dialog --
-     *              used for the command-line manifest, where a dialog would
-     *              pop up before the window is even on screen.
-     * @return Whether the manifest loaded.
-     */
     bool loadManifest(const QString& path, bool quiet = false) {
         const chr::TileMode mode = tileMode();
 
@@ -192,18 +148,11 @@ public:
         canvas_->setTable(*table_);
         canvas_->resize(canvas_->sizeHint());
         sheetScroll_->verticalScrollBar()->setValue(0);
-        // Which manifest the tiles come from is recorded in the .anim, so
-        // switching to another one is a change to the project.
         if (differentManifest) markDirty();
         refreshTitle();
 
-        // Cell indices are only meaningful for the table they came from, and
-        // this is a different table even when it is the same file -- so the
-        // pick is dropped rather than silently pointing at another tile.
-        // Already-placed sprites keep their own copy of the art and stay.
         clearPick();
 
-        // A slot on every field means whatever the sheet now says a tile is.
         for (MetaspritePage* page : pages_) {
             page->setTileMode(mode);
         }
@@ -218,10 +167,6 @@ public:
                        .arg(mode == chr::TileMode::Size8x16 ? "cells" : "tiles")
                        .arg(table_->entries.size())
                        .arg(table_->entries.size() == 1 ? "entry" : "entries");
-        // Which frames the sheet was reached through, since that is what
-        // decides which entries contributed any cells at all -- a sheet with
-        // fewer tiles than the manifest has is the expected outcome, not a
-        // load that went wrong.
         summary_ += frames_.empty()
                         ? QString(" (no frames -- every entry, unnumbered)")
                         : QString(" through %1 frame%2")
@@ -237,21 +182,13 @@ public:
         return true;
     }
 
-    /// Width the sheet panel needs: 16 cells at the current zoom, plus the
-    /// vertical scrollbar that is always shown, plus the panel frame.
     [[nodiscard]] int sheetWidth() const {
         const int scrollBarPx = style()->pixelMetric(QStyle::PM_ScrollBarExtent, nullptr, sheetScroll_);
         const int framePx = 2 * sheetScroll_->frameWidth();
         return kCellsPerRow * chr::kTilePixels * zoom_ + scrollBarPx + framePx;
     }
 
-    /**
-     * @brief Sizes the window to the sheet panel plus room for a metasprite,
-     *        as tall as the screen comfortably allows.
-     */
     void fitToScreen(const QRect& available) {
-        // The menu bar and status bar sit outside the central widget, so the
-        // window has to be that much taller than the columns it holds.
         const int chromeHeight = menuBar()->sizeHint().height() + statusBar()->sizeHint().height();
 
         const int wanted = sheetWidth() + metaspriteAreaWidth();
@@ -261,22 +198,15 @@ public:
         resize(std::max(1, width), height);
     }
 
-    /// Starting width for the metasprite area: what the current page asks for,
-    /// floored at something a field is comfortable in. It is only a starting
-    /// point -- the area takes whatever width is left over after the sheet
-    /// panel, and the page scrolls when that is less than its field.
     [[nodiscard]] int metaspriteAreaWidth() const {
         const int wanted = tabs_->currentWidget() ? tabs_->currentWidget()->sizeHint().width() : 0;
         const int floorPx = kMetaspriteAreaMinPxAt1080p * zoom_ / kZoomAt1080p;
         return std::max(wanted, floorPx);
     }
 
-    /// Adds a metasprite tab and shows it.
     void newMetasprite() {
         auto* page = new MetaspritePage(zoom_, paletteStore_, tabs_);
         connect(page, &MetaspritePage::statusChanged, this, [this, page](const QString& text) {
-            // Only the visible page talks to the status bar; a background tab
-            // emitting on its way out would otherwise overwrite the message.
             if (tabs_->currentWidget() == page) {
                 statusBar()->showMessage(text);
             }
@@ -294,14 +224,10 @@ public:
 
         const int index = tabs_->addTab(page, page->name());
         pages_.push_back(page);
-        // The page made its first frame during construction, before any of the
-        // connections above existed, so the label is brought up to date here
-        // rather than waiting for the next change.
         retitle(page);
         tabs_->setCurrentIndex(index);
     }
 
-    /// Adds a metasprite with no frames, for a load to fill in.
     MetaspritePage* appendMetasprite() {
         newMetasprite();
         MetaspritePage* page = pages_.empty() ? nullptr : pages_.back();
@@ -310,9 +236,6 @@ public:
     }
 
 protected:
-    /// Every way the window can close comes through here -- the title bar, File
-    /// -> Quit, Ctrl+Q, the session ending -- so this is the one place the offer
-    /// to save has to be made.
     void closeEvent(QCloseEvent* event) override {
         if (confirmDiscard("closing")) {
             event->accept();
@@ -334,8 +257,6 @@ private:
         saveProjectAs->setShortcut(QKeySequence::SaveAs);
         connect(saveProjectAs, &QAction::triggered, this, [this] { saveProjectTo(QString()); });
         file->addSeparator();
-        // Exporting is not saving: it writes generated C++ beside nothing in
-        // particular and leaves the project exactly as dirty as it was.
         exportOne_ = file->addAction("&Export Header...");
         exportOne_->setShortcut(QKeySequence("Ctrl+E"));
         connect(exportOne_, &QAction::triggered, this, &MainWindow::exportCurrent);
@@ -374,8 +295,6 @@ private:
         connect(quit, &QAction::triggered, this, &QWidget::close);
 
         QMenu* edit = menuBar()->addMenu("&Edit");
-        // Sprites belong to a frame, not to the metasprite, so this clears
-        // the frame being looked at rather than the whole animation.
         clearFrame_ = edit->addAction("Clear &Frame");
         connect(clearFrame_, &QAction::triggered, this, [this] {
             MetaspritePage* page = currentPage();
@@ -389,18 +308,12 @@ private:
         connect(palettes, &QAction::triggered, this, &MainWindow::showPalettes);
         frames_action_ = window->addAction("&Frames...");
         connect(frames_action_, &QAction::triggered, this, &MainWindow::showFrames);
-        // Frames are the id space the sheet is numbered in, so there has to be
-        // a sheet to number before one can be edited against it.
         frames_action_->setEnabled(false);
 
         QMenu* view = menuBar()->addMenu("&View");
         tallTiles_ = view->addAction("&8x16 Tiles");
         tallTiles_->setCheckable(true);
-        // Regrouping changes the cells themselves, so the manifest is simply
-        // re-read -- cheap, and it keeps one code path for building a table.
         connect(tallTiles_, &QAction::toggled, this, [this] {
-            // The mode is a project setting, so changing it is unsaved work
-            // whether or not a manifest is loaded to re-read.
             markDirty();
             if (!manifestPath_.isEmpty()) loadManifest(manifestPath_);
         });
@@ -409,17 +322,12 @@ private:
     }
 
 public:
-    /// Records that there is work a save would keep, and shows it in the title
-    /// bar the way every editor does.
     void markDirty() {
         if (dirty_) return;
         dirty_ = true;
         refreshTitle();
     }
 
-    /// Forgets that there is unsaved work. Called after a save or a load, and
-    /// once at startup -- the metasprite the window opens with is scaffolding,
-    /// not something the user would want to be asked about.
     void markClean() {
         dirty_ = false;
         refreshTitle();
@@ -437,15 +345,6 @@ private:
         setWindowTitle(title);
     }
 
-    /**
-     * @brief Offers to save before something that discards unsaved work.
-     *
-     * @param action What is about to happen, for the prompt ("closing", "opening
-     *               another project").
-     * @return Whether to go ahead. False means the user cancelled, or chose to
-     *         save and the save did not happen (a cancelled Save As, or a write
-     *         that failed) -- in which case nothing should be discarded.
-     */
     bool confirmDiscard(const QString& action) {
         if (!dirty_) return true;
 
@@ -460,15 +359,9 @@ private:
         if (answer == QMessageBox::Discard) return true;
 
         saveProjectTo(projectPath_);
-        // saveProjectTo clears the flag only when it actually wrote, so this
-        // covers a cancelled Save As dialog and a failed write alike.
         return !dirty_;
     }
 
-    /// Opens the palette editor, or brings it forward if it is already open.
-    /// Opens the frame editor and applies what it returns: the project's
-    /// frames, any rename the placed sprites have to follow, and a reload of
-    /// the sheet, which is the only way the new ids reach it.
     void showFrames() {
         if (!table_) return;
 
@@ -478,11 +371,6 @@ private:
             entries.push_back({ QString::fromStdString(entry.name), entry.size });
         }
 
-        // The preview draws from the manifest read WITHOUT frames and in 8x8:
-        // a frame being set up has to show art that no frame reaches yet, and
-        // a preview of a frame is a pattern table of 8x8 ids whatever height
-        // this project's sprites are. Read here rather than kept around,
-        // because it is only wanted while the dialog is open.
         std::string error;
         auto tiles = chr::loadManifest(manifestPath_.toStdString(), chr::TileMode::Size8x8, error);
         if (!tiles) {
@@ -496,8 +384,6 @@ private:
         FrameWindow editor(frames_, std::move(entries), *tiles, this);
         if (editor.exec() != QDialog::Accepted) return;
 
-        // Renames first: they are about the sprites already placed, which the
-        // reload below deliberately leaves alone.
         int moved = 0;
         for (const auto& [from, to] : editor.renames()) {
             for (MetaspritePage* page : pages_) {
@@ -510,9 +396,6 @@ private:
         frames_ = editor.frames();
         markDirty();
 
-        // The sheet is built FROM the frames, so it is rebuilt rather than
-        // adjusted. This drops the pick, for the reason loadManifest gives:
-        // every cell index it had belonged to the old numbering.
         if (!manifestPath_.isEmpty()) loadManifest(manifestPath_);
 
         if (moved != 0) {
@@ -532,7 +415,6 @@ private:
         paletteWindow_->activateWindow();
     }
 
-    /// Rebuilds the sheet's palette dropdown, keeping the choice by name.
     void refreshSheetPalettes() {
         const QString wanted = sheetPalette_->currentIndex() <= 0 ? QString()
                                                                   : sheetPalette_->currentText();
@@ -545,7 +427,6 @@ private:
             const int index = wanted.isEmpty() ? 0 : sheetPalette_->findText(wanted);
             sheetPalette_->setCurrentIndex(index >= 0 ? index : 0);
         }
-        // The colours may have changed even when the list has not.
         applySheetPalette();
     }
 
@@ -555,13 +436,10 @@ private:
         canvas_->setPaletteTable(paletteTable(name.isEmpty() ? nullptr : paletteStore_->find(name)));
     }
 
-    /// The page on the current tab, or nullptr when there are no tabs.
     [[nodiscard]] MetaspritePage* currentPage() const {
         return qobject_cast<MetaspritePage*>(tabs_->currentWidget());
     }
 
-    /// How the sheet is currently grouping tiles, which is also what a slot on
-    /// every field means.
     [[nodiscard]] chr::TileMode tileMode() const {
         return tallTiles_->isChecked() ? chr::TileMode::Size8x16 : chr::TileMode::Size8x8;
     }
@@ -570,10 +448,6 @@ private:
         QWidget* widget = tabs_->widget(index);
         if (!widget) return;
         if (auto* page = qobject_cast<MetaspritePage*>(widget)) {
-            // Closing a metasprite discards every frame in it, and nothing
-            // undoes that, so one with sprites in it asks first. Suppressed
-            // while a project is being opened, where the tabs being closed are
-            // the ones just replaced.
             if (!replacing_ && page->hasContent()) {
                 const auto answer = QMessageBox::question(
                     this, "Close metasprite",
@@ -592,9 +466,6 @@ private:
     }
 
     void tabChanged(int) {
-        // QTabWidget emits currentChanged for the first tab added, which
-        // happens in the constructor before buildMenus() has made the actions
-        // this would enable.
         if (!closeMeta_ || !clearFrame_) return;
 
         MetaspritePage* page = currentPage();
@@ -607,35 +478,23 @@ private:
         statusBar()->showMessage(page ? page->summary() : summary_);
     }
 
-    /// A metasprite tab's label carries its frame count -- the one number
-    /// worth seeing without switching to it. The frame tabs inside carry their
-    /// own names.
     void retitle(MetaspritePage* page) {
         const int index = tabs_->indexOf(page);
         if (index < 0) return;
-        // The label is built from the page's own name, so a rename needs
-        // nothing parsed back out of the old label.
         const QString name = page->name().trimmed();
         tabs_->setTabText(index, QString("%1 (%2)")
                                      .arg(name.isEmpty() ? QString("metasprite") : name)
                                      .arg(page->frameCount()));
-        // Closing the last frame of a metasprite has to grey out the actions
-        // that need one.
         closeFrame_->setEnabled(page->currentFrame() != nullptr);
         clearFrame_->setEnabled(page->currentFrame() != nullptr);
     }
 
-    /// A cell on the sheet became the pick; every field stamps it from now on.
     void pickCell(int index) {
         if (!table_ || index < 0 || static_cast<std::size_t>(index) >= table_->cells.size()) return;
 
         const chr::Cell&  cell  = table_->cells[static_cast<std::size_t>(index)];
         const chr::Entry& entry = table_->entries[cell.entry];
 
-        // An unnumbered cell cannot be stamped: a sprite made from it would
-        // have no pattern byte, which is not a sprite anything could export.
-        // Refused at the pick rather than at the stamp, so the reason is given
-        // when the tile is chosen instead of on every click afterwards.
         if (!cell.numbered()) {
             statusBar()->showMessage(
                 QString("%1::%2 has no id -- no frame reaches it. Open a project, or add a "
@@ -666,21 +525,11 @@ private:
         }
     }
 
-    /// The cell a saved sprite names. frame/entry/include/tile identifies the
-    /// art exactly; a tile id alone does not, since two entries at the same
-    /// offset into their windows share ids. The id is the fallback for a
-    /// manifest that has been reorganised since the save.
-    /// The loaded sheet's cell for a saved sprite, by the same rule the
-    /// headless export uses (proj::findCell) -- so opening a project and
-    /// exporting it from a script resolve every sprite to the same cell.
     [[nodiscard]] const chr::Cell* findCell(const std::string& frame, const std::string& entry,
                                             const std::string& include, int tile, int id) const {
         return table_ ? proj::findCell(*table_, frame, entry, include, tile, id) : nullptr;
     }
 
-    /// Which frame and window the ids on the same line came from, or nothing
-    /// when the sheet has no frames. Parenthesised and leading with a space so
-    /// it appends onto a status line that reads properly without it.
     static QString formatCellFrame(const chr::Cell& cell) {
         return cell.frame.empty()
             ? QString()
@@ -690,14 +539,8 @@ private:
     }
 
     static QString formatCellId(const chr::Cell& cell) {
-        // A cell no frame reached has no id to show -- and saying so is the
-        // point, since it is also why it cannot be stamped.
         if (!cell.numbered()) return QString("unnumbered");
 
-        // An 8x16 cell occupies two consecutive ids, so both are worth showing
-        // -- and the byte that selects the pair is neither of them when the
-        // frame sits in the $1000 pattern table, so that is shown beside them
-        // rather than left for someone to work out from the frame.
         return cell.heightTiles == 2
             ? QString("$%1-$%2, OAM $%3")
                   .arg(cell.id, 2, 16, QChar('0'))
@@ -706,8 +549,6 @@ private:
             : QString("$%1").arg(cell.id, 2, 16, QChar('0'));
     }
 
-    /// Status line for the hovered cell, or the table summary when @p index is
-    /// -1 (pointer over empty space).
     void showCell(int index) {
         if (!table_ || index < 0 || static_cast<std::size_t>(index) >= table_->cells.size()) {
             statusBar()->showMessage(summary_);
@@ -716,8 +557,6 @@ private:
 
         const chr::Cell&  cell  = table_->cells[static_cast<std::size_t>(index)];
         const chr::Entry& entry = table_->entries[cell.entry];
-        // The frame, not the entry: an entry says where the art was packed,
-        // while the id on this line is what the frame makes of it.
         statusBar()->showMessage(QString("%1::%2  tile %3  id %4  (%5x%6)%7")
                                      .arg(QString::fromStdString(entry.name),
                                           QString::fromStdString(cell.include))
@@ -729,21 +568,14 @@ private:
     }
 
 public:
-    // ---- project files ----
 
-    /// Assembles the project from the window's own state.
     [[nodiscard]] proj::Project buildProject(const QString& path) const {
         proj::Project project;
         project.path = path.toStdString();
         project.mode = tileMode();
         project.metaspritesDir = metaspritesDir_;
-        // Held as the window's own state rather than rebuilt from the sheet:
-        // the frames are what the sheet was BUILT from, including any window
-        // that names no entry, which no cell could tell us about.
         project.frames = frames_;
 
-        // The manifest path is stored relative to the .anim, so a project and
-        // its art can be moved or checked out anywhere together.
         std::error_code ec;
         std::filesystem::path base = project.path.parent_path();
         if (base.empty()) base = ".";
@@ -760,8 +592,6 @@ public:
         return project;
     }
 
-    /// One metasprite as the window has it -- what a save writes and what an
-    /// export generates from, so the two cannot disagree about what a frame is.
     [[nodiscard]] proj::Metasprite buildMetasprite(const MetaspritePage* page) const {
         proj::Metasprite metasprite;
         metasprite.palette = page->paletteName().toStdString();
@@ -799,7 +629,6 @@ public:
         return metasprite;
     }
 
-    /// Saves to @p path, asking for one when it is empty.
     void saveProjectTo(QString path) {
         if (manifestPath_.isEmpty()) {
             QMessageBox::warning(this, "Save Project",
@@ -813,8 +642,6 @@ public:
                 this, "Save Project", QDir::currentPath(),
                 QString("Animator projects (*%1);;All files (*)").arg(proj::kProjectExtension));
             if (path.isEmpty()) return;
-            // A missing extension is added rather than refused: the dialog's
-            // filter is a hint, not something it enforces.
             if (!path.endsWith(proj::kProjectExtension)) path += proj::kProjectExtension;
         }
 
@@ -828,8 +655,6 @@ public:
             return;
         }
 
-        // save() reports the stem each metasprite ended up as, which is what a
-        // later rename moves from.
         for (std::size_t i = 0; i < pages_.size() && i < project.metasprites.size(); ++i) {
             pages_[i]->setSavedStem(QString::fromStdString(project.metasprites[i].savedStem));
         }
@@ -843,11 +668,7 @@ public:
                                      .arg(QString::fromStdString(metaspritesDir_)));
     }
 
-    // ---- generated headers ----
 
-    /// Where an export starts looking: a `gen` folder beside the project when
-    /// there is one -- that is where generated code goes in this repo -- and
-    /// the project's own folder otherwise.
     [[nodiscard]] QString exportDir() const {
         const QString base = projectPath_.isEmpty() ? QDir::currentPath()
                                                     : QFileInfo(projectPath_).absolutePath();
@@ -855,7 +676,6 @@ public:
         return QFileInfo(gen).isDir() ? gen : base;
     }
 
-    /// Writes the metasprite being edited as one generated header.
     void exportCurrent() {
         MetaspritePage* page = currentPage();
         if (!page) {
@@ -870,8 +690,6 @@ public:
         }
 
         const proj::Metasprite metasprite = buildMetasprite(page);
-        // The file is named after the metasprite, as the class inside it is:
-        // the name is the identity here as much as it is in the .msprite.
         const QString suggested = QDir(exportDir()).filePath(QString::fromStdString(
             codegen::identifier(metasprite.name) + codegen::kHeaderExtension));
 
@@ -879,13 +697,9 @@ public:
             this, "Export Header", suggested,
             QString("C++ headers (*%1);;All files (*)").arg(codegen::kHeaderExtension));
         if (path.isEmpty()) return;
-        // Same as the project dialogs: a missing extension is added rather than
-        // refused, since the filter is a hint and not a rule.
         if (!path.endsWith(codegen::kHeaderExtension)) path += codegen::kHeaderExtension;
 
         std::string error;
-        // The banner names the project the metasprite came from, when it has
-        // been saved into one -- the .msprite is what a regeneration reads.
         const std::string source =
             projectPath_.isEmpty() ? std::string() : QFileInfo(projectPath_).fileName().toStdString();
         if (!codegen::writeHeader(metasprite, path.toStdString(), source, error)) {
@@ -896,8 +710,6 @@ public:
             return;
         }
 
-        // An export is not a save: the project is left exactly as dirty as it
-        // was, since none of this is in the .anim.
         statusBar()->showMessage(QString("Exported %1 (%2 frame%3 of %4)")
                                      .arg(QFileInfo(path).fileName())
                                      .arg(page->frameCount())
@@ -905,8 +717,6 @@ public:
                                      .arg(page->name()));
     }
 
-    /// Writes every metasprite into one folder, a header each, named after the
-    /// metasprite.
     void exportAll() {
         if (pages_.empty()) {
             QMessageBox::warning(this, "Export All Headers", "There are no metasprites to export.");
@@ -950,7 +760,6 @@ public:
         if (!path.isEmpty()) openProject(path);
     }
 
-    /// Replaces everything in the window with @p path's contents.
     bool openProject(const QString& path) {
         std::string error;
         const auto project = proj::load(path.toStdString(), error);
@@ -966,25 +775,16 @@ public:
             std::fprintf(stderr, "animator: warning: %s\n", warning.c_str());
         }
 
-        // The mode has to be in place before the manifest is read, since it is
-        // what decides how cells are grouped -- and set without a signal, or
-        // the toggle would re-read the manifest from under this.
         {
             const QSignalBlocker blocked(tallTiles_);
             tallTiles_->setChecked(project->mode == chr::TileMode::Size8x16);
         }
 
-        // The frames have to be in place before the manifest is read, for the
-        // same reason the mode does: they are what decides which tiles become
-        // cells and what id each one gets. Restored on failure, since the
-        // project is not opened and the sheet still belongs to the old one.
         std::vector<chr::Frame> previousFrames = frames_;
         frames_ = project->frames;
 
         const auto manifest = proj::resolve(*project, project->chrManifest);
         if (!loadManifest(QString::fromStdString(manifest.string()))) {
-            // loadManifest has already said why; the project is not opened,
-            // since every sprite in it names tiles from that manifest.
             frames_ = std::move(previousFrames);
             return false;
         }
@@ -994,8 +794,6 @@ public:
             closeTab(0);
         }
         replacing_ = false;
-        // Palettes go in before the pages, so every page's dropdown already
-        // has the name its metasprite asks for.
         paletteStore_->setPalettes(project->palettes);
         metaspriteCount_ = 0;
         metaspritesDir_ = project->metaspritesDir;
@@ -1089,9 +887,6 @@ private:
     QAction*                      tallTiles_ = nullptr;
     QAction*                      frames_action_ = nullptr;
 
-    /// The project's frames, as the sheet is currently numbered in. Empty for
-    /// a manifest opened on its own, which is the fallback chr::loadManifest
-    /// documents -- not a project state.
     std::vector<chr::Frame>       frames_;
     std::optional<chr::Table>     table_;
     std::vector<MetaspritePage*>  pages_;
@@ -1109,16 +904,7 @@ private:
 } // namespace
 
 int main(int argc, char** argv) {
-    // --export-all switches into the headless export (exporter::run) instead
-    // of opening anything -- parsed by hand, ahead of QApplication ever
-    // touching argv, because the export needs no Qt at all: every piece of it
-    // (proj, chr, codegen) is Qt-free, so this path works over ssh, from a
-    // script, or in a CI job with no display server. It is the same
-    // exporter::run the standalone `animator-export` binary is, so the two
-    // write identical headers; see exporter.hpp.
     {
-        // The GUI's own switches, so --help from this binary describes the
-        // whole of it and not just the export half.
         static constexpr const char* kGuiUsage =
             "  -t, --tall         open a bare manifest with 8x16 tile grouping\n"
             "\n"
@@ -1135,10 +921,6 @@ int main(int argc, char** argv) {
 
     QApplication app(argc, argv);
 
-    // Everything QApplication didn't claim (its own -style, -platform, ... are
-    // stripped from argv by its constructor): an optional -t/--tall for 8x16
-    // grouping, and one file to open -- a project (.anim) or a blobman
-    // manifest, told apart by extension, since both are TOML.
     bool tall = false;
     QString file;
     for (int i = 1; i < argc; ++i) {
@@ -1154,8 +936,6 @@ int main(int argc, char** argv) {
     }
     const bool isProject = file.endsWith(proj::kProjectExtension, Qt::CaseInsensitive);
 
-    // Scale against the screen the pointer is on, like uitk -- on a mixed-DPI
-    // multi-monitor setup that is the one the window is about to open on.
     QScreen* screen = QGuiApplication::screenAt(QCursor::pos());
     if (!screen) {
         screen = app.primaryScreen();
@@ -1164,23 +944,15 @@ int main(int argc, char** argv) {
     const QRect available = screen ? screen->availableGeometry() : geometry;
 
     MainWindow window(zoomForScreen(geometry));
-    // A project carries its own mode, so -t/--tall only applies to a bare
-    // manifest.
     if (!isProject) window.setTallTiles(tall);
     if (!file.isEmpty() && !isProject) {
         window.loadManifest(file, /*quiet=*/true);
     }
-    // One metasprite tab to start with, so the field is there to use rather
-    // than something to go and create first. The sheet beside it is always
-    // visible, so nothing has to be switched to in order to pick a tile. A
-    // project replaces the lot, so it is opened instead.
     if (isProject) {
         window.openProject(file);
     } else {
         window.newMetasprite();
     }
-    // Nothing done up to here is the user's unsaved work, so the window starts
-    // clean -- otherwise quitting straight after launch would ask about a save.
     window.markClean();
     window.fitToScreen(available);
     window.show();

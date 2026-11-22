@@ -11,9 +11,6 @@
 namespace exporter {
 namespace {
 
-/// Everything this prints is prefixed with the tool's name: a configure-time
-/// export's output lands in the middle of CMake's own log, where an unlabelled
-/// line is nobody's.
 constexpr const char* kTag = "animator";
 
 void info(const std::string& line) {
@@ -30,15 +27,12 @@ std::string hex2(int value) {
     return text;
 }
 
-/// A PPU address, four digits -- a frame's pattern table reads as $1000.
 std::string hex4(std::uint32_t value) {
     char text[16];
     std::snprintf(text, sizeof(text), "%04x", value);
     return text;
 }
 
-/// "1 frame" / "2 frames", because a log that says "1 frames" reads like a bug
-/// in the thing being diagnosed. @p many is for the nouns an 's' does not fix.
 std::string plural(std::size_t count, const std::string& noun, const std::string& many = {}) {
     if (count == 1) return "1 " + noun;
     return std::to_string(count) + " " + (many.empty() ? noun + "s" : many);
@@ -48,9 +42,6 @@ const char* modeName(const chr::TileMode mode) {
     return mode == chr::TileMode::Size8x16 ? "8x16" : "8x8";
 }
 
-/// One frame's pattern bytes in slot order, as the generated header will hold
-/// them -- the whole point of the verbose log, since this is the data the
-/// console actually reads and the one thing a stale header gets wrong.
 std::string frameBytes(const proj::Frame& frame, int tilesX, int tilesY) {
     std::vector<int> slots(static_cast<std::size_t>(tilesX) * static_cast<std::size_t>(tilesY),
                            codegen::kNoTile);
@@ -109,9 +100,6 @@ Parse parseArgs(int argc, char** argv, Options& options, const bool exportImplie
         } else if (arg == "-v" || arg == "--verbose") {
             options.verbose = true;
         } else if (!arg.empty() && arg.front() == '-') {
-            // Only in export mode: the GUI's own main has its own switches
-            // (-t/--tall), and this parse runs ahead of it rather than
-            // instead of it.
             if (!wantsExport) return Parse::NoExport;
             problem("unknown option '" + arg + "'");
             usage(program, extraUsage);
@@ -151,10 +139,6 @@ int run(const Options& options) {
 
     const std::filesystem::path output =
         options.output.empty() ? project->path.parent_path() / kDefaultOutputDir : options.output;
-    // Normalized only for the log and for what is reported on failure: the
-    // manifest path is a relative one joined onto the project's directory, so
-    // it reads as "demo/animations/../chr/config.toml" otherwise. Purely
-    // lexical, so it needs no filesystem and cannot fail.
     const std::filesystem::path manifest =
         proj::resolve(*project, project->chrManifest).lexically_normal();
 
@@ -175,22 +159,11 @@ int run(const Options& options) {
     info("  manifest " + project->chrManifest + " -> " + manifest.string());
     info("  output   " + output.string());
 
-    // The manifest is not optional here, even though every sprite already
-    // carries a pattern byte from its .msprite: that byte is only as current
-    // as the last save, and either half of what produced it may have moved
-    // since -- the CHR layout (a new include, a repack) or the frame the
-    // sprite draws through. Re-resolving is what makes a blobman edit, or a
-    // re-ordered window, reach the generated headers.
     auto table = chr::loadManifest(manifest, project->mode, project->frames, error);
     if (!table) {
         problem("cannot read the CHR manifest " + manifest.string() + ": " + error);
         return 1;
     }
-    // The sheet's own warnings are about the CHR layout, not about anything
-    // being exported -- an 8x16 project reading a manifest with odd-sized
-    // background entries in it has a couple of dozen, every one of them
-    // expected and none of them this export's business. Counted here and
-    // listed under -v, rather than spilled into every configure's log.
     std::string sheet = "  sheet    " + plural(table->entries.size(), "entry", "entries") + ", " +
                         plural(table->cells.size(), "cell") + ", blob " +
                         std::to_string(table->blobSize) + " bytes";
@@ -205,9 +178,6 @@ int run(const Options& options) {
         }
     }
 
-    // Said once, here, rather than discovered per sprite: with no frames
-    // nothing has an id, so every sprite in the project would fail to resolve
-    // and the real problem would be buried under one error per sprite.
     if (project->frames.empty()) {
         problem("cannot export " + options.project.string() +
                 ": the project declares no frames, so no sprite has a tile id. Add a [[frame]] "
@@ -232,13 +202,6 @@ int run(const Options& options) {
                     continue;
                 }
                 if (cell->patternByte != sprite.patternByte) {
-                    // A stored byte equal to the stored id is what a .msprite
-                    // written before the pattern key existed reads back as
-                    // (proj::load falls back to the id), so it says nothing
-                    // about the CHR layout having moved -- it only means the
-                    // project has not been saved since. Noted under -v, but
-                    // kept out of the count, or every build of a project
-                    // nobody has re-saved would carry a line about it.
                     const bool legacy = sprite.patternByte == sprite.id;
                     if (!legacy) ++repaired;
                     if (options.verbose) {
@@ -269,8 +232,6 @@ int run(const Options& options) {
              "exported (-v lists them)");
     }
 
-    // What each header will hold, logged BEFORE the write: if the write then
-    // fails, the log already says which header it was on.
     std::size_t bytes = 0;
     std::size_t headers = 0;
     for (const proj::Metasprite& metasprite : project->metasprites) {
@@ -307,9 +268,6 @@ int run(const Options& options) {
         problem("export failed: " + error);
         return 1;
     }
-    // codegen::writeAll's own skip list, not the frameless ones already logged
-    // above -- kept separate so a reason this tool does not know about still
-    // reaches the log.
     for (const std::string& line : skipped) {
         problem("warning: " + line);
     }

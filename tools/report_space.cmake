@@ -1,32 +1,5 @@
-# report_space.cmake
-# Runs at build time via: cmake -P report_space.cmake
-#   -DREADELF=<path to llvm-readelf>
-#   -DNM=<path to llvm-nm>
-#   -DELF_FILE=<path to the final linked ELF>
-#
 # Prints how full every memory region is after a link: capacity, used, free.
-# Purely informational -- nothing consumes its output, and it never fails a
-# build (a region that genuinely overflows is already a hard linker error long
-# before this runs).
-#
-# WHY REGIONS, NOT SECTIONS: "free space in a section" isn't a quantity -- an
-# output section is exactly as large as the content in it, never larger. The
-# number that actually matters is how much of a REGION's fixed capacity is
-# still unspent: room left in the switchable PRG window, in each 8 KiB bank,
-# in the fixed bank, in zero page. So every allocated section is summed into
-# whichever region's address range it falls in.
-#
-# DRIVEN ENTIRELY BY THE LINKER, not by layout knowledge restated here. The
-# scripts publish __space_origin_<region> / __space_length_<region> pairs for
-# every region they declare (see mmc3-helper.ld's own __space_* block), and
-# this file discovers regions purely by finding those pairs in the symbol
-# table. Two consequences worth the coupling:
-#
-#   - An EMPTY region still gets reported. A region holding nothing produces
-#     no output section at all, so a linked ELF on its own cannot even tell
-#     you an unused 8 KiB bank exists -- these symbols are the only reason
-#     "bank 2: 0 / 8192 used" can be printed.
-#   - Changing a region's size, or adding a new one, needs no edit here.
+# Purely informational -- nothing consumes its output and it never fails a build.
 
 cmake_minimum_required(VERSION 3.18)
 
@@ -47,7 +20,6 @@ if(NOT NM_RC EQUAL 0 OR NOT RE_RC EQUAL 0)
     return()
 endif()
 
-# ---- Discover regions from __space_origin_* / __space_length_* ------------
 set(RNAMES "")
 set(RBASES "")
 set(RCAPS  "")
@@ -78,10 +50,6 @@ if(NREGIONS EQUAL 0)
     return()
 endif()
 
-# ---- Sum each allocated section into its region ---------------------------
-# FSCODE and friends have no leading dot, so the name pattern can't require
-# one. Zero-size sections are skipped: they contribute nothing and llvm-mos
-# emits a lot of them (.rom_poke_table_0..31).
 string(REPLACE "\n" ";" LINES "${SECTIONS}")
 foreach(LINE ${LINES})
     if(NOT LINE MATCHES "\\[ *[0-9]+\\] +([^ ]+) +(PROGBITS|NOBITS) +([0-9a-fA-F]+) +[0-9a-fA-F]+ +([0-9a-fA-F]+)")
@@ -109,7 +77,6 @@ foreach(LINE ${LINES})
     endwhile()
 endforeach()
 
-# ---- Report ---------------------------------------------------------------
 message(STATUS "Region space (used / capacity):")
 
 set(I 0)

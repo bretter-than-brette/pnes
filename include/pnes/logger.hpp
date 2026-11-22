@@ -2,29 +2,13 @@
  * @file logger.hpp
  * @brief Zero-footprint NES logging.
  *
- * log("message") costs one instruction on TARGET_NES -- a single `nop`,
- * which exists so the call site has an address of its own for the host-side
- * tooling to find (see ::PNES_LOG_ANCHOR for what goes wrong without it,
- * and how to opt back out). Everything else it emits is free: it declares
- * `static const` data (never read or written by anything at runtime) tagged
- * into `.pnes_log`, a section none of the mapper linker scripts (see
- * src/nes/mappers/debug-log.ld, INCLUDEd from mmc3-helper.ld/vrc1-helper.ld)
- * ever assign to a MEMORY region -- it survives in the linked .elf for the
- * host-side `logger` tool to read back out after the build, but contributes
- * zero bytes to the final ROM image and zero cycles to anything that runs.
+ * On NES, log("...") costs one `nop` -- the anchor the host tooling resolves to
+ * (see ::PNES_LOG_ANCHOR). Everything else lands in `.pnes_log`, a section no
+ * mapper script maps to a MEMORY region, so it survives in the .elf for the
+ * `logger` tool and contributes nothing to the ROM. tools/pnes.lua then prints
+ * each message in Mesen when the CPU reaches that physical location.
  *
- * `logger` pairs each call site's __FILE__/__LINE__/message (read straight
- * out of .pnes_log -- never by reopening the .cpp/.hpp source) with the
- * nearest real instruction's address via the .elf's own DWARF line table,
- * then resolves that address to a flat, bank-switching-agnostic PRG-ROM
- * offset using nothing but standard ELF section metadata (see this
- * project's design notes -- this step needs no mapper-specific knowledge).
- * tools/pnes.lua then prints the message in Mesen whenever the CPU
- * actually reaches that physical location, regardless of which mapper is in
- * play or which bank currently occupies that CPU window.
- *
- * Off NES, log(msg) is real: there is no ROM budget to protect and no
- * emulator needed to see it, so it just prints to stdout immediately.
+ * Off NES, log() is real and prints to stdout immediately.
  */
 #pragma once
 
@@ -37,36 +21,15 @@ using namespace br0::intsh;
 
 namespace log_detail {
 
-/**
- * @brief One %-format argument's compile-time-captured location.
- *
- * Never the VALUE -- log() itself never reads or formats anything on NES.
- * `address` is a real, live CPU address (RAM/zero-page/WRAM), not a
- * .pnes_log offset like Entry::file/message are: tools/pnes.lua reads it
- * straight out of Mesen's own memory when the log point fires. That's only
- * possible because `address` is fixed at link time, which means `value` in
- * ::MakeArg must be a real object with static storage duration (a global or
- * static, or a member of one) -- a local variable or temporary has no
- * address that's still meaningful by the time Mesen gets around to reading
- * it, so passing one here simply fails to compile.
- */
+/// Never the value -- log() formats nothing on NES. `address` is a live CPU
+/// address, so @p value must have static storage duration: a local has no
+/// address still meaningful by the time Mesen reads it.
 struct Arg {
     const volatile void *address;
     u8 size;
     u8 is_signed;
 };
 
-/**
- * @brief One log() call site's compiler-generated metadata.
- *
- * Never read at runtime -- the host-side `logger` tool is the only reader,
- * and only after the build, straight out of the linked .elf's .pnes_log
- * section. `file` and `message` point at sibling .pnes_log data, never at
- * .rodata: see ::PNES_LOG_TEXT for why that distinction matters. `args`
- * likewise points at sibling .pnes_log data (an ::Arg array); `arg_count`
- * says how many of it are real -- see ::PNES_LOG_IMPL for why the array
- * itself always has at least one (possibly unused) element.
- */
 struct Entry {
     const char *file;
     u32 line;
@@ -76,8 +39,6 @@ struct Entry {
     u8 kind; // PNES_LOG_KIND_LOG or PNES_LOG_KIND_PAUSE
 };
 
-/// See ::Arg's own header comment for why `value` must be a fixed-address
-/// object. Enums are captured by their underlying type's signedness.
 template <typename T>
 constexpr Arg MakeArg(const volatile T &value) {
     using U = std::conditional_t<std::is_enum_v<T>, std::underlying_type_t<T>, T>;
@@ -86,45 +47,25 @@ constexpr Arg MakeArg(const volatile T &value) {
 
 } // namespace log_detail
 
-// Fraction (0.0-1.0) of that region's total size below which
-// tools/pnes.lua's heap/stack trackers stay quiet -- e.g. 0.25 warns past a
-// quarter of the heap. lua_log_builder converts this to an absolute byte
-// count once, at build time; nothing on NES itself ever reads either one.
 extern const float silentHeapAmount;
 extern const float silentStackAmount;
 
 #define PNES_LOG_CAT_(a, b) a##b
 #define PNES_LOG_CAT(a, b)  PNES_LOG_CAT_(a, b)
 
-/**
- * @brief Places a string literal's bytes into .pnes_log instead of .rodata.
- *
- * Needed for both __FILE__ and the caller's message: an ::Entry pointing at
- * ordinary .rodata data would leak those bytes into the ROM even though the
- * Entry itself doesn't. `used` keeps the compiler from treating an
- * apparently-dead (never read) static array as eligible for removal --
- * nothing at runtime ever dereferences these pointers, which is exactly
- * what "zero footprint" requires, but it means nothing at runtime looks
- * like a "use" either.
- */
+/// An Entry pointing at ordinary .rodata would leak those bytes into the ROM
+/// even though the Entry does not. `used`, because nothing at runtime
+/// dereferences these -- which is exactly what zero footprint requires.
 #define PNES_LOG_TEXT(name, text) \
     static const char name[] __attribute__((section(".pnes_log"), used)) = text
 
-// Entry::kind values -- see tools/pnes.lua for how each is handled: a log
-// entry gets formatted and printed, a pause entry halts emulation instead.
 #define PNES_LOG_KIND_LOG   0
 #define PNES_LOG_KIND_PAUSE 1
 
-// Counts __VA_ARGS__ (0 through 8). The leading `dummy` absorbs the
-// zero-args case, where __VA_OPT__ contributes no comma and __VA_ARGS__
-// contributes no tokens at all.
 #define PNES_LOG_NARG_(_0, _1, _2, _3, _4, _5, _6, _7, _8, N, ...) N
 #define PNES_LOG_NARG(...) \
     PNES_LOG_NARG_(dummy __VA_OPT__(,) __VA_ARGS__, 8, 7, 6, 5, 4, 3, 2, 1, 0)
 
-// Maps ::log_detail::MakeArg over each of up to 8 comma-separated arguments.
-// PNES_LOG_CAT forces PNES_LOG_NARG(...) to expand to a plain digit before
-// pasting, the same way it's already used to build unique per-call-site names.
 #define PNES_LOG_MAP1(x)      ::log_detail::MakeArg(x)
 #define PNES_LOG_MAP2(x, ...) ::log_detail::MakeArg(x), PNES_LOG_MAP1(__VA_ARGS__)
 #define PNES_LOG_MAP3(x, ...) ::log_detail::MakeArg(x), PNES_LOG_MAP2(__VA_ARGS__)
@@ -135,71 +76,22 @@ extern const float silentStackAmount;
 #define PNES_LOG_MAP8(x, ...) ::log_detail::MakeArg(x), PNES_LOG_MAP7(__VA_ARGS__)
 #define PNES_LOG_MAP(N, ...)  PNES_LOG_CAT(PNES_LOG_MAP, N)(__VA_ARGS__)
 
-/**
- * @brief Zero-footprint log call site. See this file's own header comment.
- *
- * log("plain message") works exactly as before. log("hp=%d", hp) also
- * captures hp's address/size/signedness (see ::log_detail::MakeArg) into
- * .pnes_log, right beside the format string -- nothing is ever formatted on
- * NES itself; tools/pnes.lua reads hp's LIVE value out of Mesen's own
- * memory and interpolates it there when this line actually executes.
- *
- * __COUNTER__ is captured once via the id parameter (expanded as an
- * argument, then pasted repeatedly) so every declaration below names the
- * same call site consistently -- referencing __COUNTER__ directly more than
- * once would yield a different value each time.
- *
- * The Arg array always has a trailing dummy element even with zero real
- * args, so it's never a zero-size array (ill-formed) and Entry::args is
- * always a valid, non-null pointer -- Entry::arg_count (not the array's own
- * size) is what tools/pnes.lua actually trusts.
- */
+/// log("hp=%d", hp) captures hp's address, size and signedness beside the format
+/// string; tools/pnes.lua reads the live value out of Mesen's memory. __COUNTER__
+/// is captured once via the id parameter, since referencing it twice yields two
+/// values. The Arg array carries a trailing dummy so it is never zero-size.
 #define log(msg, ...) \
     PNES_LOG_IMPL(PNES_LOG_KIND_LOG, msg, __COUNTER__ __VA_OPT__(,) __VA_ARGS__)
 
-/**
- * @brief Halts emulation the instant this line executes. See this file's
- * own header comment. Always on, on NES, same as log() -- gating a debug
- * aid behind a build type would leave it silently absent from a release
- * ROM's actual behavior; see tools/pnes.lua for how emu.breakExecution()
- * is invoked once this call site's LMA is reached.
- */
 #define pause() PNES_LOG_IMPL(PNES_LOG_KIND_PAUSE, "", __COUNTER__)
 
-/**
- * @brief The one real instruction a log call site emits: its anchor.
- *
- * WITHOUT THIS, A LOG POINT HAS NO ADDRESS OF ITS OWN. The metadata below
- * records (file, line) and nothing else, so tools/luaLogBuilder has to find
- * the call site's address in the .elf's DWARF line table -- and a statement
- * that emits no instructions gets no line-table row. The builder then
- * borrows the nearest row at a LATER line, which fails in both directions,
- * and both failures were observed in this project's own demo:
- *
- *  - A log sitting just above a loop borrowed the row belonging to the
- *    loop's first instruction, so a once-at-boot message printed on every
- *    iteration, forever -- reporting a place control had already left.
- *  - The three logs inside that loop's switch arms had no later row in the
- *    file at all (the optimiser funnels every arm through one shared
- *    trampoline, whose rows sit at earlier lines), so they resolved to
- *    nothing and were dropped with a build warning. A log point that cannot
- *    fire is worse than none: its silence reads as evidence.
- *
- * One `nop` fixes both: the line table gets a row at exactly this line, the
- * builder's exact-match path always wins, and the address it resolves to is
- * an instruction that exists only to mark this call site -- so reaching it
- * means reaching the log, and nothing else does. `volatile` is what keeps
- * it: the compiler must not delete it, duplicate it, or hoist it out of a
- * loop, and it may not reorder it past another volatile asm or a memory
- * access. It cannot move across the statements that matter either, which is
- * the whole point of putting it here rather than trusting line attribution.
- *
- * THE COST IS ONE BYTE AND TWO CYCLES PER CALL SITE, which is no longer
- * "zero footprint" (see this file's header comment) -- the .pnes_log
- * metadata still costs nothing, but the anchor is real ROM. Define
- * ::PNES_LOG_NO_ANCHOR to get the old behaviour back: zero bytes, and log
- * positions that are approximate at best and silently absent at worst.
- */
+/// Without the anchor a log point has no address of its own: a statement that
+/// emits no instructions gets no DWARF line-table row, so the builder borrows the
+/// nearest LATER one. That misfired both ways in this project's own demo -- a log
+/// above a loop printed every iteration forever, and logs in a switch's arms
+/// resolved to nothing and were dropped. `volatile` is what stops the nop being
+/// deleted, duplicated or hoisted. Costs one byte and two cycles per call site;
+/// ::PNES_LOG_NO_ANCHOR gets the old approximate behaviour back.
 #ifdef PNES_LOG_NO_ANCHOR
     #define PNES_LOG_ANCHOR() ((void)0)
 #else
@@ -229,27 +121,15 @@ extern const float silentStackAmount;
 
 #elif defined(TARGET_PS2) && !defined(NDEBUG)
 
-// ps2sdk's EE side has no hosted libc stdio behind it (no filesystem, no
-// attached terminal) -- <iostream>'s global static-init (the real
-// std::cout's ios_base::Init object) jumped through an unpopulated pointer
-// and crashed the EE before main() ever ran when this used the generic
-// branch below, so this never includes <iostream> at all. sio_init/sio_puts
-// (ps2sdk's own low-level serial driver, <sio.h>) write straight to the EE's
-// real serial port hardware instead -- no stream objects, no locale
-// globals, nothing but the port itself -- which is exactly what PCSX2's "EE
-// SIO output" logging option (and a real serial cable on hardware) reads.
-// Formatting reuses plain snprintf (libc's buffer formatter, same reasoning:
-// no stream objects) straight into a fixed buffer, so a caller passes
-// ordinary printf-style specifiers (%d/%x/%u/...) matching its own argument
-// types -- same contract as printf itself, unlike the generic LogFormat
-// below, which auto-formats an arbitrary type through operator<<.
+// ps2sdk's EE has no hosted stdio behind it, and <iostream>'s global static-init
+// jumped through an unpopulated pointer and crashed the EE before main(). So this
+// never includes it: sio_puts writes straight to the serial port, which is what
+// PCSX2's "EE SIO output" reads. snprintf-style, so a caller passes ordinary
+// printf specifiers.
 #include <sio.h>
 #include <cstdio>
 
 namespace log_detail {
-/// Lazy, not tied to RESET/EnsureConsoleOnce: sio_puts() needs the port
-/// configured first, but unlike the desktop console there's no "more
-/// expensive to create later" concern -- it's just register writes.
 inline void EnsureSioOnce() {
     static bool done = false;
     if (done) return;
@@ -267,9 +147,6 @@ inline void EnsureSioOnce() {
         sio_puts(_pnes_sio_buf);                                      \
     } while (0)
 
-/// No interactive stdin on PS2 to block on (contrast
-/// ::tech::WaitForKeypress's POSIX/Windows implementations) -- logs that
-/// this was hit and carries straight on, rather than hanging forever.
 #define pause()                                                       \
     do {                                                              \
         ::log_detail::EnsureSioOnce();                                \
@@ -278,31 +155,12 @@ inline void EnsureSioOnce() {
 
 #elif defined(TARGET_PS3) && !defined(NDEBUG)
 
-// Same problem the PS2 branch above exists to avoid, and the same shape of
-// answer. PSL1GHT's newlib has no filesystem and no terminal behind stdio, so
-// the generic <iostream> branch below would run std::ios_base::Init's global
-// constructor before main() against a libc that has nowhere to put the bytes
-// -- which is exactly what crashed the EE and is why the PS2 branch was
-// written. Rather than find out whether the PPU survives it, this takes the
-// serial-port equivalent: sysTtyWrite (sys/tty.h) is a static-inline lv2
-// syscall, so there is no library to link, no stream object, no locale
-// globals, nothing that has to be initialised before the first log() call.
-// RPCS3 surfaces channel 0 in its TTY log; on hardware it is what ps3load's
-// console captures.
-//
-// Formatting reuses snprintf into a fixed buffer for the same reason the PS2
-// branch does, which means a caller passes ordinary printf-style specifiers
-// (%d/%x/%u/...) matching its own argument types -- the same contract as
-// printf, unlike the generic LogFormat below, which auto-formats an arbitrary
-// type through operator<<.
-//
-// There is no EnsureSioOnce() counterpart: unlike the EE's serial port, the
-// lv2 TTY needs no setting up before it is written to.
+// The PS2 branch's problem again: PSL1GHT's newlib has nowhere to put stdio's
+// bytes either. sysTtyWrite is a static-inline lv2 syscall, so there is no stream
+// object and nothing to initialise. RPCS3 surfaces channel 0 in its TTY log.
 #include <sys/tty.h>
-// <stdio.h>, and unqualified snprintf below, not <cstdio>/std::snprintf as the
-// PS2 branch uses: ps3dev's newlib declares snprintf in the global namespace
-// only, and this libstdc++'s <cstdio> does not re-export it into std, so the
-// qualified spelling does not compile here at all.
+// <stdio.h> and unqualified snprintf, not std::snprintf: ps3dev's newlib
+// declares it in the global namespace only.
 #include <stdio.h>
 #include <cstring>
 
@@ -321,42 +179,19 @@ inline void TtyPuts(const char *msg) {
         ::log_detail::TtyPuts(_pnes_tty_buf);                         \
     } while (0)
 
-/// No interactive stdin to block on here (same as the PS2 branch) -- logs
-/// that this was hit and carries straight on, rather than hanging forever.
 #define pause()                                                       \
     ::log_detail::TtyPuts("log: pause() hit -- no stdin on PS3, continuing\n")
 
 #elif defined(TARGET_CTR) && !defined(NDEBUG)
 
-// The 3DS has nowhere for stdout to go, which is the same problem the PS2 and
-// PS3 branches above exist to solve -- and, like them, the answer is whichever
-// channel this console actually has. consoleInit() is not an option: it claims
-// a whole screen's framebuffer, and both screens belong to citro2d here
-// (src/3ds/video.cpp), so the generic <iostream> branch below would compile
-// fine and write every message into the void.
-//
-// The SD card is what is left, and it is the better channel anyway for being
-// the ONLY one that reads the same on hardware and under an emulator -- Azahar,
-// Citra and Lime3DS all back the virtual SD with a real host directory, so
-// `sdmc:/pnes.log` is a file on the developer's disk either way. (On hardware
-// it is a file on the card, read after the fact rather than live; there is no
-// terminal to tail on this platform, with or without this.)
-//
-// OPENED ONCE AND FLUSHED PER LINE, not reopened per message: these fire from
-// the mode loops, and an open/close pair around each one is an FS round trip
-// through a service call -- enough to change the timing of what is being
-// diagnosed. Truncating ("w") rather than appending, so the file describes THIS
-// run; a log that accumulates every run since the SD card was formatted is one
-// nobody reads the top of.
-//
-// Formatting is snprintf-style, like the PS2/PS3 branches and unlike the
-// generic one below: a caller passes ordinary printf specifiers matching its
-// own argument types. Every log() call site in this project already does.
+// consoleInit() is not an option -- it claims a screen's framebuffer, and both
+// belong to citro2d -- so the SD card is what is left, and it is the only channel
+// that reads the same on hardware and under an emulator. Opened once and flushed
+// per line, because an open/close pair per message is an FS round trip through a
+// service call. Truncating, so the file describes THIS run.
 #include <cstdio>
 
 namespace log_detail {
-/// Lazy, so a run that never logs never creates the file. nullptr on failure
-/// (no SD, or a read-only card), which every call site below tolerates.
 inline FILE* CtrLogFile() {
     static FILE* f = std::fopen("sdmc:/pnes.log", "w");
     return f;
@@ -373,10 +208,6 @@ inline FILE* CtrLogFile() {
         }                                                             \
     } while (0)
 
-/// No interactive stdin on the 3DS to block on (same as the PS2/PS3 branches)
-/// -- logs that this was hit and carries straight on, rather than hanging
-/// forever. A real "press a button" wait would need hidScanInput on the render
-/// thread, which is the thing a pause() is usually called to inspect.
 #define pause()                                                       \
     log("pause() hit at %s:%d -- no stdin on 3DS, continuing", __FILE__, __LINE__)
 
@@ -389,30 +220,12 @@ inline FILE* CtrLogFile() {
 
 namespace log_detail {
 
-/// operator<< has no overload for an arbitrary scoped enum (eGameModes and
-/// friends) -- print its underlying value instead, same information the
-/// NES/Mesen side ends up showing (it never sees the enum type at all,
-/// only ::MakeArg's raw size/signedness). A byte-sized integral (u8/i8,
-/// or an enum with one as its underlying type -- exactly eGameModes'
-/// shape) is further promoted to int/unsigned, since operator<< treats
-/// (unsigned) char as a character to print, not a number to format.
-/// ::std::underlying_type_t, but only ever INSTANTIATED for an enum.
-///
-/// NOT std::conditional_t<std::is_enum_v<T>, std::underlying_type_t<T>, T>,
-/// which is what this replaced and which cannot work: conditional_t is an
-/// ordinary template, so BOTH its branches are instantiated before the
-/// condition picks one, and std::underlying_type<T> has no `type` member for a
-/// non-enum T. The result was a hard error -- "no type named 'type' in
-/// 'struct std::underlying_type<unsigned char>'", reported inside this header
-/// rather than at the call site -- for any ::log argument that was a plain
-/// byte. That went unnoticed because the only byte-sized values this project
-/// had ever logged were scoped enums (eGameModes), and the generic-debug
-/// branch this lives in is compiled out of a Release build (NDEBUG) -- so it
-/// took a `log("%d", someU8)` in a Debug build off NES to surface it.
-///
-/// A partial specialisation defers the lookup: the primary template names no
-/// underlying type at all, and only the `true` specialisation mentions it, so
-/// nothing asks a non-enum for one.
+/// operator<< has no overload for a scoped enum, so print the underlying value,
+/// promoted when byte-sized (operator<< treats a char as a character). NOT
+/// conditional_t<is_enum_v<T>, underlying_type_t<T>, T>, which cannot work: both
+/// branches are instantiated before the condition picks one, and
+/// underlying_type<T> has no `type` for a non-enum. A partial specialisation
+/// defers the lookup instead.
 template <typename T, bool = std::is_enum_v<T>>
 struct UnderlyingOf { using type = T; };
 
@@ -433,19 +246,11 @@ constexpr auto LogPrintable(T &&value) {
     }
 }
 
-/// Base case: no arguments left -- print whatever's left of the format
-/// string verbatim (including a stray "%d" if the caller passed fewer
-/// arguments than format specifiers -- a caller bug, not something to hide).
 inline void LogFormat(const char *fmt) {
     std::cout << fmt;
 }
 
-/// Off NES there's a real runtime and real values in hand, so interpolation
-/// just happens immediately via operator<< -- no address/size/signedness
-/// capture needed (contrast ::MakeArg on the NES side, where nothing can be
-/// read until Mesen gets around to it). %x/%X get hex formatting to match
-/// what tools/pnes.lua produces for the same specifier on the NES side;
-/// everything else (%d, %u, ...) is just the value's own default formatting.
+/// %x/%X get hex to match what tools/pnes.lua produces for the same specifier.
 template <typename T, typename... Rest>
 void LogFormat(const char *fmt, T &&value, Rest &&...rest) {
     while (*fmt) {
@@ -464,29 +269,16 @@ void LogFormat(const char *fmt, T &&value, Rest &&...rest) {
 
 } // namespace log_detail
 
-/// Off NES, debug builds only -- log() is gated behind DEBUG entirely here,
-/// not just the console-creation fallback: a release build must never pay
-/// for (or emit) this, matching log()'s NES side always costing nothing.
-/// No EnsureConsoleOnce() call here: that runs once, unconditionally, from
-/// ::RESET's own expansion (interrupts.hpp) at actual program startup --
-/// not lazily from the first log() call, so a console is guaranteed to
-/// exist by the time ANY log() call runs, even a run that only calls it
-/// once, deep into the game.
-/// "log: " matches tools/pnes.lua's own prefix for a log() message on the
-/// NES/Mesen side -- there's no "app: " counterpart here, since there's no
-/// separate loader/tool step on this path to have diagnostics of its own.
+/// Gated behind DEBUG entirely, so a release build never pays for this, matching
+/// log()'s NES side always costing nothing. EnsureConsoleOnce() is not called
+/// here -- ::RESET runs it at startup, so a run that only logs once still has a
+/// console.
 #define log(msg, ...) \
     ((std::cout << "log: "), ::log_detail::LogFormat(msg __VA_OPT__(,) __VA_ARGS__), (std::cout << '\n'))
 
-/// Off NES, debug builds only, mirroring log()'s own gating -- prints a
-/// notice and blocks for a single keypress via ::tech::WaitForKeypress()
-/// (console.hpp), which puts the terminal in raw mode so Enter isn't
-/// required. NOTE: WaitForKeypress() reads real stdin, which is NOT the
-/// synthesized terminal ::tech::EnsureConsoleOnce() may have spawned for
-/// stdOUT -- that terminal's `tail -f` isn't interactive. pause() therefore
-/// only works as intended when this process was launched from a real
-/// terminal to begin with; otherwise it blocks on whatever the original
-/// (non-interactive) stdin actually is.
+/// @note WaitForKeypress reads real stdin, which is not the terminal
+/// EnsureConsoleOnce may have spawned for stdout -- so pause() only works as
+/// intended when the process was launched from a real terminal.
 #define pause() \
     ((std::cout << "log: pause() hit at " << __FILE__ << ":" << __LINE__ \
                  << " -- press any key to continue...\n" << std::flush), \
@@ -494,8 +286,6 @@ void LogFormat(const char *fmt, T &&value, Rest &&...rest) {
 
 #else
 
-/// Off NES, release build: log()/pause() cost nothing and do nothing, same
-/// as the NES side always does.
 #define log(msg, ...) ((void)0)
 #define pause() ((void)0)
 

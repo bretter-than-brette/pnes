@@ -34,10 +34,6 @@ that still needs it rather than silently dropping colours.
 import argparse
 import sys
 
-# Alpha this high is stored as opaque (the RGB5A3 "5-bit" half, which has no
-# alpha bits at all). 224 is the midpoint of the top 3-bit alpha step: a pixel
-# rounding to a=7 loses nothing by becoming fully opaque, and gains two bits of
-# colour depth per channel.
 OPAQUE_ALPHA_FLOOR = 224
 
 PALETTE_ENTRIES = 256
@@ -47,9 +43,7 @@ TILE_W, TILE_H = 8, 4
 def rgb5a3(r: int, g: int, b: int, a: int) -> int:
     """One RGBA8 pixel as an RGB5A3 half-word."""
     if a >= OPAQUE_ALPHA_FLOOR:
-        # Bit 15 set: no alpha, 5 bits per channel.
         return 0x8000 | ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3)
-    # Bit 15 clear: 3 bits of alpha, 4 bits per channel.
     return ((a >> 5) << 12) | ((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4)
 
 
@@ -77,15 +71,9 @@ def main() -> int:
                          f"got {len(raw)}\n")
         return 1
 
-    # Encode first, index second: two RGBA8 colours that collapse to the same
-    # RGB5A3 half-word must share one palette entry, or a 200-colour source can
-    # overflow 256 entries that it does not actually need.
     pixels = [rgb5a3(raw[i], raw[i + 1], raw[i + 2], raw[i + 3])
               for i in range(0, len(raw), 4)]
 
-    # First-appearance order, scanning in tile order below would work equally
-    # well -- what matters is that it is deterministic, so an unchanged source
-    # produces an unchanged blob and does not retrigger a compile.
     palette: dict[int, int] = {}
     for px in pixels:
         if px not in palette:

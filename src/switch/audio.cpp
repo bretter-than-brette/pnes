@@ -1,26 +1,16 @@
 /**
  * @file audio.cpp
- * @brief Music playback for the Nintendo Switch backend (libnx audout).
+ * @brief Music and effects for the Switch backend (libnx audout).
  *
- * Mirrors the desktop audio contract (audio.hpp): the demo registers tracks in
- * its track table and calls Init / TrackPlay / Update. libnx's audout
- * device is fixed at 48 kHz / 2ch / signed-16 PCM, so the build pipeline encodes
- * the source WAV to exactly that format (see the ffmpeg step in the Switch
- * branch of CMakeLists.txt) and ships it in the .nro's RomFS. This backend reads
- * that raw PCM into RAM once and streams it.
+ * audout is fixed at 48kHz/2ch/s16, so the build encodes the source to exactly
+ * that and ships it in the .nro's RomFS; this reads it into RAM once and streams
+ * it from a dedicated thread that blocks on audout's released-buffer signal, so
+ * Update() is a no-op.
  *
- * Streaming runs on a dedicated thread that blocks on audout's
- * released-buffer signal, refills the freed chunk from the track (looping at the
- * track's loop point), and re-appends it. Keeping playback off the render thread
- * means audio is never coupled to (and never stalls) the 60Hz frame loop --
- * Update() is therefore a no-op here.
- *
- * SFX (registered via ::audio::SetSfx, same RomFS raw-PCM pipeline as
- * tracks) are loaded once into their own buffer and played on one of
- * ::N_SFX_VOICES fixed voice slots; fill_chunk() additively mixes every
- * active voice into the same chunk the track streams from, same as any two
- * PCM sources ever mix -- summed, sample by sample, with clamping. Starting
- * a new SFX on a channel that's still playing cuts the old one off.
+ * Effects come through the same RomFS pipeline and play on fixed voice slots,
+ * additively mixed into the same chunk the track streams from -- summed with
+ * clamping, as any two PCM sources mix. Starting an effect on a busy channel cuts
+ * the old one off.
  */
 #include "internal.hpp"
 #include <pnes/audio.hpp>
@@ -30,46 +20,17 @@
 #include <cstdlib>
 #include <cstring>
 
-// audout native format: 48000 Hz, 2 channels, PCM signed 16-bit.
 static constexpr u32 SAMPLE_RATE     = 48000;
 static constexpr u32 BYTES_PER_FRAME = 2 /*ch*/ * sizeof(s16);
 static constexpr u32 BYTES_PER_SEC   = SAMPLE_RATE * BYTES_PER_FRAME;  // 192000
 
-// Triple-buffered ~21ms chunks. Each must be 0x1000-aligned with a 0x1000-
-// multiple size (audout.h's AudioOutBuffer), so 0x1000 -- 1024 frames at
-// 48kHz -- is the SMALLEST legal chunk, and that floor is the only reason this
-// is not lower.
-//
-// SIZED FOR SFX LATENCY, NOT FOR THE MUSIC, and the difference is large.
-// Effects are mixed into this same stream (::fill_chunk), so an effect cannot
-// start until the chunk it was first mixed into reaches the DAC -- and that
-// chunk is one just released, sitting behind every chunk still queued. The
-// delay is therefore the PIPELINE DEPTH, (N_BUF-1) chunks at worst:
-//
-//   0x4000 x 3 (what this was):  85ms chunks, 256ms queued -> 171-256ms
-//   0x1000 x 3 (this):           21ms chunks,  64ms queued ->  43-64ms
-//
-// A quarter-second-late menu blip reads as a bug; ~3 frames reads as the
-// press. The music does not care either way -- it is a continuous stream and
-// hears no difference between the two.
-//
-// WHAT IT COSTS is starvation tolerance: the mixer thread must now refill
-// within 21ms of a release, with 43ms of audio queued behind it, where before
-// it had 171ms of slack. It is a priority-0x20 thread (above main's 0x2C)
-// doing a 4KB memcpy and a mix, so the deadline is not tight -- but a stall
-// over ~43ms would now be an audible dropout where it used to be absorbed.
-// N_BUF 4 is the hedge if that ever shows up; N_BUF 2 would halve the latency
-// again, at 21ms of tolerance, which is where this stops being worth it.
-//
-// THE REAL FIX FOR SUB-20ms is audren rather than audout: per-voice
-// submission on ~5ms ticks, which would make effects their own voices the way
-// ASND already does on GameCube (src/ogc/audio.cpp) instead of mixing them
-// into the song. That is a backend rewrite, not a constant.
+// The music is scaled BEFORE the effects are summed in, which is what makes
+// TrackVolume music-only. An effect therefore starts no sooner than the chunk it
+// lands in reaches the DAC (43-64ms); per-voice submission is the real fix, which
+// is what the 3DS backend does with ndsp's hardware voices.
 static constexpr u32 CHUNK   = 0x1000;
 static constexpr int N_BUF   = 3;
 
-// audio.hpp declares these for the desktop mixer; the Switch streams via audout
-// instead, but define them so the externs resolve if anything references them.
 float *audio::pcm_buffer = nullptr;
 u32 audio::pcm_buffer_size = 0;
 
@@ -85,37 +46,16 @@ static bool    running   = false;
 static bool    playing   = false;
 static bool    paused    = false;
 static u32     play_pos  = 0;      // current read offset into track_data
-// audio::TrackVolume's setting, as a percentage of full output. Applied in
-// software -- audout has no per-stream level, and the music and the effects
-// share one chunk, so the scale has to happen between them (::fill_chunk).
 static u8      volume    = 100;
 
-// One-shot SFX PCM: same 48k/2ch/s16 RomFS raw format as tracks, loaded
-// once at init and concatenated into its own buffer (mtx also guards this
-// state -- audio_thread reads it every chunk while the game thread calls
-// SfxPlay).
 struct sfx_runtime_t { u32 offset; u32 length; };   // byte offset/length into sfx_data
 static sfx_runtime_t sfx_info[256];
 static u8            *sfx_data = nullptr;
 
-// The voice-slot count, taken from audio.hpp rather than declared here, so
-// the number this backend allocates is the same one audio::sfxChannels
-// publishes to callers -- see its comment on why it differs from the NES's.
 static constexpr int N_SFX_VOICES = audio::sfxChannels;
-// `paused` is a separate flag and not the absence of `active`, because
-// clearing `active` is already how a voice reports that it FINISHED -- the
-// mixer drops it and the cursor goes with it. A pause has to keep the cursor
-// to be distinguishable from audio::SfxStop.
-// `gain` is this backend's reading of audio.hpp's uninterpreted volume byte: a
-// linear amplitude coefficient, 0 silent and 255 unity. Kept as the byte it
-// arrived as rather than converted up front -- this mixer is integer, so the
-// scale happens per sample in the mix below and a float here would only buy a
-// conversion back.
 struct sfx_voice_t { u32 pos; u32 end; u8 gain; bool active; bool paused; };
 static sfx_voice_t sfx_voices[N_SFX_VOICES];
 
-// Translate "tracks/foo.wav" -> "romfs:/tracks/foo.raw" (the build re-encodes
-// the desktop WAV to raw 48k PCM and bakes it into the .nro RomFS).
 static void romfs_raw_path(const char *fp, char *out, size_t cap) {
     snprintf(out, cap, "romfs:/%s", fp);
     char *dot = strrchr(out, '.');
@@ -144,15 +84,11 @@ static void load_track(u8 index) {
     }
     fclose(f);
 
-    // loop_start is in seconds (0 = loop the whole track); convert to a
-    // frame-aligned byte offset.
     u32 lp = static_cast<u32>(tracks[index].loop_start * BYTES_PER_SEC);
     lp &= ~(BYTES_PER_FRAME - 1);
     loop_point = (track_len && lp < track_len) ? lp : 0;
 }
 
-// Load and concatenate every declared SFX (mirrors load_track's shape) into
-// one raw-PCM buffer, filling sfx_info with each entry's byte offset/length.
 static void load_sfx() {
     u32 total = 0;
     for (u8 i = 0; i < nSfx; i++) {
@@ -184,10 +120,6 @@ static void load_sfx() {
     }
 }
 
-// @p volume is a linear amplitude coefficient here: 0 silence, 255 unity --
-// this backend's reading of the byte audio.hpp deliberately leaves
-// uninterpreted, and the same one SDL3 and Wii U use, since all three are the
-// same voice-mixing shape.
 void audio::SfxPlay(const u8 index, const u8 channel, const u8 volume) {
     if (index >= nSfx || channel >= N_SFX_VOICES || sfx_info[index].length == 0) return;
     mutexLock(&mtx);
@@ -200,14 +132,8 @@ void audio::SfxPlay(const u8 index, const u8 channel, const u8 volume) {
     mutexUnlock(&mtx);
 }
 
-// Unity: there is no separate sample bank off NES to carry a level of its own
-// (audio.hpp's ::SfxSamplePlay), so this plays the asset as authored.
 void audio::SfxSamplePlay(const u8 index) { audio::SfxPlay(index, 1, 0xFF); }
 
-// Exact here, unlike the NES driver: a voice is a cursor this backend owns, so
-// releasing or freezing one is local state (see audio.hpp's ::SfxStop on why
-// the NES cannot). Both ignore an out-of-range channel rather than clamping
-// into someone else's slot; the range is audio::sfxChannels.
 void audio::SfxStop(const u8 channel) {
     if (channel >= N_SFX_VOICES) return;
     sfx_voices[channel].active = false;
@@ -220,8 +146,6 @@ void audio::SfxPause(const u8 channel, const u8 pause) {
 }
 
 
-// Fill one chunk from the track (or silence when stopped/paused/absent),
-// then additively mix in every active SFX voice (s16, clamped).
 static void fill_chunk(u8 *dst) {
     mutexLock(&mtx);
     if (!playing || paused || track_len == 0) {
@@ -241,11 +165,6 @@ static void fill_chunk(u8 *dst) {
 
     i16 *out = reinterpret_cast<i16 *>(dst);
 
-    // Music volume, scaled BEFORE the SFX mix below -- that ordering is the
-    // whole reason this is here and not at the end: effects mixed in afterwards
-    // keep their full level, which is what audio.hpp promises. Skipped
-    // altogether at 100, so a game that never sets a volume pays nothing. The
-    // product is computed in `int`: i16 * 100 overflows 16 bits.
     if (volume != 100) {
         for (u32 i = 0; i < CHUNK / sizeof(i16); i++) {
             out[i] = static_cast<i16>(static_cast<int>(out[i]) * volume / 100);
@@ -257,12 +176,6 @@ static void fill_chunk(u8 *dst) {
         u32 avail = v.end - v.pos;
         u32 n = CHUNK < avail ? CHUNK : avail;
         const i16 *src = reinterpret_cast<const i16 *>(sfx_data + v.pos);
-        // Scaled by this voice's own gain, then added and clamped as before.
-        // `/ 255` and not `>> 8` because 255 is unity: a shift would make full
-        // volume 255/256 of the asset's level, which is inaudible on its own
-        // but means SfxPlay(..., 0xFF) and SfxSamplePlay disagree. The divisor
-        // is a constant, so the compiler turns it into a multiply and a shift.
-        // Gain is hoisted out of the loop -- it cannot change mid-chunk.
         const int gain = v.gain;
         for (u32 i = 0; i < n / sizeof(i16); i++) {
             const int scaled = static_cast<int>(src[i]) * gain / 255;
@@ -310,13 +223,11 @@ void audio::Init(u8) {
 
     mutexInit(&mtx);
     running = true;
-    // Higher priority than the main thread (0x2C) so the mixer stays fed; default core.
     if (R_SUCCEEDED(threadCreate(&athread, audio_thread, nullptr, nullptr, 0x10000, 0x20, -2)))
         threadStart(&athread);
 }
 
 void audio::Update() {
-    // Streaming is driven by the audout thread; nothing to do per frame.
 }
 
 void audio::TrackPlay(const u8 index) {
@@ -334,9 +245,6 @@ void audio::TrackStop() {
     mutexUnlock(&mtx);
 }
 
-// Under the mutex, like every other writer of ::fill_chunk's state: the audio
-// thread reads ::volume there, and a torn read would be an audible step in the
-// middle of a chunk rather than between two.
 void audio::TrackVolume(const u8 percent) {
     mutexLock(&mtx);
     volume = percent > 100 ? 100 : percent;

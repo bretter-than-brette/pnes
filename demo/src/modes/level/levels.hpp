@@ -14,12 +14,9 @@ namespace level {
     constexpr i16 kHudRows = 1;
     extern u16 nColumns;
 
-    // Highest cameraX the level allows: (nColumns - viewport_mx()) << 4.
-    // Derived from nColumns, so constant for the whole level -- but it sits in
-    // ProcessMovement's camera-scroll path, which recomputed it every frame P1
-    // moved horizontally. A 16-bit subtract plus a 16-bit shift-by-4 (eight
-    // shift/rotate pairs on a 6502) to reach an answer that cannot change.
-    // Set by LoadLevel alongside nColumns.
+    // Highest cameraX the level allows. Derived from nColumns, so constant for
+    // the level -- but it sat in the camera-scroll path and was recomputed every
+    // frame the player moved, for an answer that cannot change.
     extern u16 maxCameraX;
     extern const u8* TileData;
     extern const u8 LevelDataAttributes[];
@@ -38,19 +35,10 @@ namespace level {
     void BuildPrevColumn(u8* buf, u16 worldCol);   // left-scroll: reads window column
     bool LoadLevel(u16 n);
 
-    // Resets edgeR/dynEdgeR to the level start (world column 0) and fills
-    // nCols nametable columns (i in [0, nCols), so nCols should be even -- it
-    // is two tile columns per metatile column) from there via
-    // GetNextWrite/GetCurrentNext -- the same streaming
-    // fill EnterLevelSetup uses to seed the level view, and title.cpp's
-    // level preview to render a shorter version of the same thing. Always
-    // writes at nametable row 2 (just below the 2-row HUD) and 28 rows
-    // tall (levelHeight metatiles) -- both GetNextWrite/GetCurrentNext's
-    // own attribute math are hardwired to that placement.
-    //
-    // An ODD number of METATILE columns (nCols == 2 mod 4) is allowed: the last
-    // attribute byte then carries only its left half, whose right half covers
-    // the metatile column after the fill, and nothing downstream inherits a
-    // parity from the count (see ::attr_half, levels.cpp).
+    // Fills nCols nametable columns from world column 0 through the same
+    // streaming path the level view and the title preview use. Always at
+    // nametable row 2 (below the 2-row HUD), 28 rows tall -- the attribute math
+    // is hardwired to that placement. An odd number of metatile columns is
+    // allowed: the last attribute byte then carries only its left half.
     void PopulateNameTableColumns(u16 nCols);
 }

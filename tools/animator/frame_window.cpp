@@ -22,12 +22,8 @@
 
 namespace {
 
-/// What a window with no entry is shown as. An empty combo item would read as
-/// a missing choice rather than the deliberate one it is.
 constexpr const char* kNoEntry = "(reserved -- not this project's)";
 
-/// Pattern tables a frame can sit in. Both are PPU addresses, which is how
-/// every other part of this project names them.
 constexpr std::uint32_t kPatternTables[] = { 0x0000, 0x1000 };
 
 QString addressLabel(const std::uint32_t address) {
@@ -40,26 +36,10 @@ QString idLabel(const int id) {
 
 } // namespace
 
-/**
- * @brief The frame as the PPU would address it: 256 tile ids, 16 across.
- *
- * A frame IS a pattern table's worth of ids, and 16 across is how every NES
- * tool draws one -- so a row is one high nibble of the id and a column the
- * low. Each window is banded and labelled with the ids it holds, and the art
- * of whatever entry it names is drawn into it tile by tile, so what is being
- * set up is visible while it is being set up rather than described in a fit
- * note beside it.
- *
- * A window naming no entry is left as the background with its id range shown:
- * reserved ids are a real part of the arrangement, not a gap.
- */
 class FramePreview final : public QWidget {
 public:
     FramePreview(const chr::Table& tiles, QWidget* parent)
         : QWidget(parent), palette_(paletteTable(nullptr)) {
-        // Keyed by entry name and tile-in-entry, which is exactly what a frame
-        // resolves an id through -- so drawing a window is a lookup per tile
-        // with no searching.
         for (const chr::Cell& cell : tiles.cells) {
             art_[tiles.entries[cell.entry].name][cell.tileInEntry] =
                 cellImage(cell, palette_);
@@ -67,7 +47,6 @@ public:
         setMinimumSize(sizeHint());
     }
 
-    /// Shows @p frame. Cheap enough to call on every keystroke of an edit.
     void setFrame(const chr::Frame* frame) {
         frame_ = frame ? *frame : chr::Frame{};
         has_ = frame != nullptr;
@@ -95,9 +74,6 @@ protected:
             const int base = static_cast<int>(w) * windowTiles;
             const QRect band = bandRect(base, windowTiles);
 
-            // Alternating bands rather than one colour per window: the point
-            // is where a window STARTS, and any two neighbours differing is
-            // enough to show that at a glance.
             painter.fillRect(band, (w % 2) ? palette().color(QPalette::AlternateBase)
                                            : palette().color(QPalette::Base));
 
@@ -110,8 +86,6 @@ protected:
                 }
             }
 
-            // The band's own label, down the left: the ids it holds, and the
-            // entry in it -- or nothing, for a reserved one.
             painter.setPen(palette().color(QPalette::Text));
             const QString label = QString("$%1").arg(base, 2, 16, QChar('0'));
             painter.drawText(QRect(0, band.top(), kLabelPx - 4, kTilePx),
@@ -121,8 +95,6 @@ protected:
             painter.drawLine(band.topLeft(), band.topRight());
         }
 
-        // The grid last, over the art, so a tile boundary stays visible
-        // against dark pixels.
         painter.setPen(QPen(palette().color(QPalette::Mid), 1, Qt::DotLine));
         for (int column = 1; column < kColumns; ++column) {
             const int x = kLabelPx + column * kTilePx;
@@ -135,12 +107,9 @@ protected:
     }
 
 private:
-    /// Ids are laid out 16 across, so an id's row is its high nibble.
     static constexpr int kColumns   = 16;
     static constexpr int kFrameRows = chr::kFrameTiles / kColumns;
 
-    /// Zoom. 8x8 art at 2x is small but readable, and a whole frame at 3x no
-    /// longer fits beside the editor's controls on a 1080p screen.
     static constexpr int kTilePx  = chr::kTilePixels * 2;
     static constexpr int kLabelPx = 28;
 
@@ -149,8 +118,6 @@ private:
                  kTilePx, kTilePx };
     }
 
-    /// A window is a whole number of rows whenever it is 16 tiles or more,
-    /// which every offered window count makes it.
     [[nodiscard]] static QRect bandRect(const int base, const int tiles) {
         return { kLabelPx, (base / kColumns) * kTilePx, kColumns * kTilePx,
                  std::max(1, tiles / kColumns) * kTilePx };
@@ -158,9 +125,6 @@ private:
 
     QVector<QRgb> palette_;
 
-    /// entry name -> tile-in-entry -> that tile, paintable. A map rather than
-    /// a vector because an entry's includes need not fill it, so the tile
-    /// indices have holes -- and a hole is drawn as the band, not as a tile.
     std::map<std::string, std::map<int, QImage>> art_;
 
     chr::Frame frame_;
@@ -168,9 +132,6 @@ private:
 };
 
 const std::vector<int>& FrameWindow::windowCounts() {
-    // Every divisor of 256 up to a point where a window is a single tile is
-    // technically legal, but a frame of 256 one-tile windows is a list nobody
-    // can read. These are the ones that correspond to real bank sizes.
     static const std::vector<int> counts = { 1, 2, 4, 8, 16 };
     return counts;
 }
@@ -238,9 +199,6 @@ FrameWindow::FrameWindow(std::vector<chr::Frame> frames, std::vector<Entry> entr
         const int row = selected();
         if (row < 0) return;
 
-        // Windows are positional, so a shrink drops from the END and a grow
-        // appends reserved ones -- anything else would renumber the windows
-        // that were already assigned.
         auto& windows = frames_[static_cast<std::size_t>(row)].windows;
         windows.resize(static_cast<std::size_t>(windowCounts()[static_cast<std::size_t>(index)]));
         refreshWindows();
@@ -266,8 +224,6 @@ FrameWindow::FrameWindow(std::vector<chr::Frame> frames, std::vector<Entry> entr
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
     connect(buttons, &QDialogButtonBox::accepted, this, [this] {
-        // Refused rather than repaired: every problem here is a choice only
-        // the author can make (which name to change, which entry does fit).
         if (const QString problem = firstProblem(); !problem.isEmpty()) {
             QMessageBox::warning(this, "Frames", problem);
             return;
@@ -371,8 +327,6 @@ void FrameWindow::refreshEditor() {
 }
 
 void FrameWindow::refreshWindows() {
-    // Rebuilt rather than reused: the row count is the window count, which is
-    // itself one of the things being edited.
     while (QLayoutItem* item = windowRows_->takeAt(0)) {
         delete item->widget();
         delete item;
@@ -408,9 +362,6 @@ void FrameWindow::refreshWindows() {
         const QString held = QString::fromStdString(frame.windows[w]);
         const int found = held.isEmpty() ? 0 : pick->findData(held);
         if (found < 0) {
-            // An entry the manifest no longer has is kept and shown rather
-            // than silently dropped to reserved: losing it would be an edit
-            // nobody asked for, and the accept check names it.
             pick->addItem(held + "  (not in this manifest)", held);
             pick->setCurrentIndex(pick->count() - 1);
         } else {
@@ -513,13 +464,9 @@ QString FrameWindow::firstProblem() const {
 
 void FrameWindow::addFrame() {
     chr::Frame frame;
-    // Two windows rather than one: the arrangement a frame usually describes
-    // is a pattern table split between the art and something else, and a
-    // single 256-tile window is the case that needs saying out loud.
     frame.name = "frame";
     frame.windows.resize(2);
 
-    // Names have to be distinct, so a second "frame" is numbered.
     int suffix = 2;
     while (std::any_of(frames_.begin(), frames_.end(),
                        [&](const chr::Frame& other) { return other.name == frame.name; })) {

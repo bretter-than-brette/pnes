@@ -1,13 +1,9 @@
 # Build-time guard for the PS2 SPU2 ADPCM music sample.
 #
-# Run via `cmake -DADP=<file> -DMAX=<bytes> -P` from the ps2 branch's encode
-# rule. Exists because oversizing this sample does NOT produce a runtime error
-# to detect: audsrv_load_adpcm() does not reject a sample too big for the
-# SPU2's sound RAM, it hangs the console during audio::Init -- measured on
-# hardware, a 1.13MB sample never reached the title screen while 756KB played
-# fine. Without this check the only symptom of nudging PS2_ADPCM_RATE or
-# PS2_ADPCM_SECONDS too far is an ELF that boots to nothing, which is a
-# miserable thing to debug. Fail the build instead.
+# Exists because oversizing the sample produces no runtime error to detect:
+# audsrv_load_adpcm() does not reject one too big for SPU2 sound RAM, it hangs
+# the console during audio::Init -- measured on hardware, a 1.13MB sample never
+# reached the title screen while 756KB played fine.
 if(NOT EXISTS "${ADP}")
     message(FATAL_ERROR "ps2 adpcm: expected encoder output '${ADP}' is missing")
 endif()

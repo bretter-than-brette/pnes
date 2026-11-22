@@ -1,32 +1,17 @@
 /**
  * @file audio.cpp
- * @brief Music playback for the Sony PSP backend (pspaudio).
+ * @brief Music playback for the PSP backend (pspaudio).
  *
- * The PSP Fat/Slim's 32-64MB of RAM can't hold the 47MB desktop pc_audio.wav
- * decoded to raw PCM the way the Switch backend's approach effectively can,
- * so this follows the GameCube/Wii U shape instead (src/ogc/audio.cpp,
- * src/wiiu/audio.cpp): the desktop WAV is transcoded to a small Vorbis OGG at
- * build time and #embedded into the EBOOT.PBP (see the psp branch of
- * CMakeLists.txt), decoded here with stb_vorbis.
+ * 32-64MB of RAM cannot hold the source decoded, so the wav is transcoded to a
+ * small Vorbis OGG at build time, embedded in the EBOOT, and decoded here with
+ * stb_vorbis. Unlike the GameCube this console has real threads and a blocking
+ * output call, so a dedicated thread decodes one chunk and hands it to
+ * sceAudioOutputBlocking() -- which blocks until the hardware has consumed the
+ * PREVIOUS chunk, so the loop paces itself. Update() is a no-op.
  *
- * Unlike GameCube (which has no threads and polls from audio::Update(), once
- * per video frame), the PSP has real kernel threads and a blocking audio
- * output call, so this streams from a dedicated thread instead: it decodes
- * one chunk, hands it to sceAudioOutputBlocking() (which blocks until the
- * hardware has consumed the PREVIOUS chunk, so the loop is naturally paced --
- * no explicit buffer-ready polling needed), and repeats. That keeps playback
- * off the 60Hz render loop entirely, so Update() is a no-op, matching the
- * Switch/Wii U backends' shape rather than GameCube's.
- *
- * No SFX path on this backend yet, and the reason is no longer "no effects
- * exist": a project DOES register a table off NES (demo/ui/impl/sounds.hpp) and
- * the menus play from it, so what is missing here is this backend's own decode
- * and mix path -- it is silent effects, not an empty table. src/ogc/audio.cpp
- * is the smallest worked example to copy from (one voice per channel, assets
- * loaded beside the executable rather than embedded, because the table belongs
- * to the application); src/switch/audio.cpp is the one to copy if the effects
- * have to be mixed into an existing output buffer, which is this backend's
- * shape.
+ * No SFX path yet, and not for want of effects: a project does register a table
+ * off NES and the menus play from it, so what is missing is this backend's own
+ * decode and mix.
  */
 #include "internal.hpp"
 #include <pnes/audio.hpp>
@@ -39,39 +24,22 @@
 #define STB_VORBIS_NO_STDIO
 #include <stb_vorbis.c>
 
-// The Vorbis-encoded music, baked into the EBOOT.PBP's ELF at build time.
-// ffmpeg produces pc_audio.ogg (encoded straight to this backend's playback
-// rate, see SAMPLE_RATE below) into the build tree and CMake puts that dir on
-// the include path, so #embed finds it. psp-g++ (GCC 15) supports #embed, the
-// same C23 mechanism the demo already uses for CHR art.
 static const unsigned char ogg_data[] = {
 #embed <pc_audio.ogg>   // resolved via --embed-dir (set in the psp CMake branch)
 };
 static constexpr int ogg_len = static_cast<int>(sizeof(ogg_data));
 
-// sceAudioOutputBlocking's hardware DAC is fixed at 44.1kHz; the OGG is
-// encoded to exactly that rate at build time so no resampling is needed here.
 static constexpr int SAMPLE_RATE = 44100;
 static constexpr int CHANNELS    = 2;
 
-// One sceAudio hardware channel, reserved for music. Sample count must be a
-// PSP_AUDIO_SAMPLE_ALIGN(64) multiple in [PSP_AUDIO_SAMPLE_MIN,
-// PSP_AUDIO_SAMPLE_MAX]; 2048 frames is ~46ms, small enough for responsive
-// TrackPlay/TrackStop, large enough that the decode thread isn't spinning.
 static constexpr int CHANNEL = 0;
 static constexpr int CHUNK_FRAMES = 2048;
 
-// audio.hpp declares these for the SDL3 mixer; this backend streams straight
-// into sceAudio chunk buffers instead, but define them so the externs resolve.
 float *audio::pcm_buffer = nullptr;
 u32 audio::pcm_buffer_size = 0;
 
 namespace {
 
-// Ping-ponged chunk buffers: audio_thread decodes into one half while
-// sceAudioOutputBlocking() drains the other (that call blocks until the
-// hardware finishes the buffer it was previously handed, so alternating
-// halves here is exactly the double-buffering that call's contract expects).
 i16 chunk[2][CHUNK_FRAMES * CHANNELS];
 
 stb_vorbis *vorbis     = nullptr;
@@ -82,37 +50,13 @@ bool        paused     = false;
 SceUID      athread;
 bool        running = false;
 
-// TrackPlay() runs on the main thread while audio_thread() is concurrently
-// mid-decode on `vorbis` -- stb_vorbis's decoder object is not safe to call
-// into from two threads at once (a seek landing mid stb_vorbis_get_samples_
-// short_interleaved() call can corrupt its internal state, after which every
-// decode call returns 0 samples forever and fill() below zero-fills every
-// chunk from then on: permanent silence with no error, no crash). See
-// src/ps2/audio.cpp's own copy of this comment, where this was first caught.
-//
-// So TrackPlay() never touches `vorbis` itself: it only posts the requested
-// index here, and audio_thread() -- the only thread allowed to call any
-// stb_vorbis_* function -- applies it at the top of its own loop. -1 means
-// no request pending.
-//
-// Plain `volatile int`, not std::atomic: the PSP's Allegrex core (like the
-// PS2's EE -- see src/ps2/audio.cpp's own copy of this comment) has no
-// hardware word-CAS, so std::atomic<int>::exchange needs libatomic, which
-// isn't wired into this toolchain's link either. A naturally-aligned int is
-// already indivisible on this single-core CPU -- `volatile` only stops the
-// compiler caching either side's read/write in a register -- and with
-// exactly one writer (TrackPlay) and one reader (audio_thread, the only one
-// that ever clears it back to -1), there's no partial-update to race on.
+// TrackPlay runs on the main thread while the decode thread is inside
+// stb_vorbis, which is not safe to call into twice, so it only posts the index
+// here. One writer, one reader, and an aligned int is indivisible here.
 volatile int pending_track = -1;
 
-// audio::TrackVolume's setting, as a percentage of full output. `volatile u8`
-// for ::pending_track's reasons exactly: one writer (TrackVolume, on the main
-// thread), one reader (audio_thread), a byte store the Allegrex cannot tear,
-// and volatile only to stop either side caching it in a register.
 volatile u8 volume = 100;
 
-// Fills chunk[which] with CHUNK_FRAMES stereo frames, looping back to
-// loop_frame on EOF (mirrors src/ogc/audio.cpp's fill()).
 void fill(const int which) {
     i16 *dst = chunk[which];
     int got = 0, stalls = 0;
@@ -136,9 +80,6 @@ void fill(const int which) {
 int audio_thread(SceSize, void *) {
     int next = 0;
     while (running) {
-        // Apply any TrackPlay() request posted from the main thread -- see
-        // ::pending_track's own comment for why this, and not TrackPlay
-        // itself, is what calls stb_vorbis_seek_start().
         const int req = pending_track;
         if (req >= 0) {
             pending_track = -1;
@@ -157,12 +98,6 @@ int audio_thread(SceSize, void *) {
         } else {
             fill(next);
         }
-        // Blocks until the PREVIOUS sceAudioOutputBlocking() call's buffer has
-        // fully drained -- this call is what paces the whole thread at the
-        // hardware's real playback rate, no sleep/poll needed.
-        // audio::TrackVolume's setting, applied by the hardware channel rather
-        // than by scaling samples: this channel carries music alone, so there
-        // is nothing else on it for the attenuation to catch.
         sceAudioOutputBlocking(CHANNEL,
                                static_cast<int>(volume) * PSP_AUDIO_VOLUME_MAX / 100,
                                chunk[next]);
@@ -192,12 +127,9 @@ void audio::Init(u8) {
 }
 
 void audio::Update() {
-    // Streaming is driven by the dedicated audio thread; nothing to do per frame.
 }
 
 void audio::TrackPlay(const u8 index) {
-    // Does NOT touch `vorbis` or `loop_frame`/`playing`/`paused` directly --
-    // only audio_thread() may call into the decoder; see ::pending_track.
     if (!vorbis || index >= nTracks) return;
     pending_track = index;
 }
@@ -206,8 +138,6 @@ void audio::TrackStop() {
     playing = false;
 }
 
-// Picked up by audio_thread() on its next chunk, like ::playing and ::paused,
-// so it takes effect within one buffer (~46ms at 44.1kHz).
 void audio::TrackVolume(const u8 percent) {
     volume = percent > 100 ? 100 : percent;
 }
@@ -217,7 +147,6 @@ void audio::TrackPause(const u8 pause) {
     paused = !paused;
 }
 
-// See the file header: no non-NES SFX table exists in this project yet.
 void audio::SfxPlay(u8 /*index*/, u8 /*channel*/, u8 /*volume*/) {}
 void audio::SfxSamplePlay(u8 /*index*/) {}
 void audio::SfxStop(u8 /*channel*/) {}

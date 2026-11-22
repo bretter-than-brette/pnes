@@ -1,45 +1,20 @@
 ﻿cmake_minimum_required(VERSION 3.21)
 
-# Per-developer overrides (paths to SDKs, custom cache vars, etc.).
-# Copy local.cmake.example to local.cmake and edit for your machine.
-# local.cmake is gitignored.
+# Per-developer overrides (SDK paths, cache vars). Copy local.cmake.example to
+# local.cmake and edit; local.cmake is gitignored.
 include("${CMAKE_SOURCE_DIR}/local.cmake" OPTIONAL)
 
-# REGION is a separate axis from TARGET_PLATFORM: it names the market a build is
-# for -- "US" or "JP" -- as a STRING, not a number or an enumerator, so it
-# reaches C++ as a string literal usable wherever a string literal is
-# (PROJECT_NAME further down is defined the same way). It is therefore NOT
-# testable with #if: the preprocessor has no string comparison, so code that
-# must branch at preprocess time keys off TARGET_* instead, and code that wants
-# the market compares this in C++. "EU" is still accepted by the validation
-# further down, but no target sets it -- see the OGC branch for why Japan is the
-# only market a GameCube build has to know about.
+# REGION names the market a build is for, as a STRING reaching C++ as a string
+# literal -- so it is NOT testable with #if, and code that must branch at
+# preprocess time keys off TARGET_* instead. There is no framerate axis beside
+# it any more: every backend measures the refresh at runtime, so one NES ROM
+# covers NTSC/PAL/Dendy and one .dol covers 50Hz, 60Hz and PAL60.
 #
-# THERE IS NO LONGER A FRAMERATE AXIS beside this one. It carried 0 for the
-# 60Hz systems and 1 for the 50Hz ones, and existed solely so nes_pal and gc_pal
-# could pick the 50Hz answers at build time. Nothing picks a refresh at build
-# time any more: every backend MEASURES it (video::DetectRefresh, see
-# include/pnes/video.hpp) and every framerate-dependent value carries both
-# halves and selects at run time, so one NES ROM covers NTSC/PAL/Dendy and one
-# GameCube .dol covers 50Hz, 60Hz and PAL60. The refresh was never a property of
-# the build, and saying it was is what PAL60 made visibly wrong.
-#
-# THIS IS NOT A local.cmake KNOB. It is derived from TARGET_PLATFORM and set()
-# unconditionally here, which is after the local.cmake include above -- so a
-# value set there is overwritten rather than honoured. That is deliberate: which
-# market a build is for is a property of the target being built, not of the
-# machine building it. Do not convert it to `if(NOT DEFINED REGION)`.
+# Not a local.cmake knob: it is derived from TARGET_PLATFORM and set()
+# unconditionally after that include, so a value set there is overwritten. Which
+# market a build is for is a property of the target, not of the machine.
 set(REGION "US")
 
-# The NES target cross-compiles with llvm-mos. Everything it needs -- clang,
-# ld.lld, llvm-readelf -- lives inside the SDK, so the build resolves those from
-# the SDK root, never the shell PATH. Point LLVM_MOS_SDK at your SDK install in
-# local.cmake (the single machine-specific path); from it we derive the
-# toolchain file and seed CMAKE_PREFIX_PATH for find_package(llvm-mos-sdk).
-# Runs before project(). An explicitly supplied toolchain
-# (-DCMAKE_TOOLCHAIN_FILE=... or an IDE preset) takes precedence and skips this.
-# Keeping the SDK off PATH lets a bare clang/clang++ resolve to the host system
-# compiler for the desktop builds instead of the 6502 cross-compiler.
 if(TARGET_PLATFORM STREQUAL "nes" AND NOT CMAKE_TOOLCHAIN_FILE)
     if(NOT LLVM_MOS_SDK)
         message(FATAL_ERROR
@@ -51,51 +26,11 @@ if(TARGET_PLATFORM STREQUAL "nes" AND NOT CMAKE_TOOLCHAIN_FILE)
     endif()
     set(CMAKE_TOOLCHAIN_FILE
         "${LLVM_MOS_SDK}/lib/cmake/llvm-mos-sdk/llvm-mos-toolchain.cmake")
-    # find_package(llvm-mos-sdk) below resolves through CMAKE_PREFIX_PATH; keep
-    # it derived from the one source of truth rather than asking for it twice.
     set(CMAKE_PREFIX_PATH "${LLVM_MOS_SDK}"
         CACHE PATH "llvm-mos-sdk root (derived from LLVM_MOS_SDK)" FORCE)
 endif()
 
-# Mapper 4 (MMC3), not NROM: linked against the generic nes-platform crt0
-# (LLVM_MOS_PLATFORM=nes, not nes-nrom), since nes-nrom's own crt0.o/link.ld
-# hardcode NROM-specific __prg_rom_size/__chr_rom_size defaults that this
-# MMC3 build must supply itself (see mmc3-helper.ld's COROLLARY-equivalent
-# reasoning, carried over from vrc1-helper.ld).
-#
-# The generic nes platform has no default link.ld (unlike nes-nrom and the
-# other mapper subtargets), so -T must be supplied explicitly. This has to
-# happen *before* ANY CXX compiler probe -- not just project() below, but
-# also enable_language(CXX) further down (ahead of find_package(Qt...) for
-# the uitk-export step), which already binds CXX to this same llvm-mos cross
-# compiler once CMAKE_TOOLCHAIN_FILE is set above. Both perform real links
-# for compiler identification/ABI detection, and without -T those fail
-# before any of this project's own code is ever touched ("cannot find linker
-# script link.ld", then a harder-to-place "No known features for CXX
-# compiler" once identification itself silently comes back empty) -- so this
-# has to sit here, immediately after CMAKE_TOOLCHAIN_FILE is set above, not
-# down by the "NES target" project() block where it used to live.
-#
-# CMAKE_CXX_FLAGS, not CMAKE_EXE_LINKER_FLAGS: CMake's own
-# CMAKE_DETERMINE_COMPILER_ID probe builds its test invocation from
-# CMAKE_<LANG>_FLAGS specifically (see CMakeDetermineCompilerId.cmake) and
-# does not consult CMAKE_EXE_LINKER_FLAGS at all, so -T placed there is
-# invisible to that one probe even though it reaches every ordinary target's
-# link step. Compile-only steps harmlessly warn that -T is unused; silenced
-# below rather than left to spam every translation unit.
 if(TARGET_PLATFORM STREQUAL "nes")
-    # BANKED CALL, Phase 5: TOPLEVEL_LD (originally VRC1_LD, renamed when the
-    # demo converted from VRC1 to MMC3 -- the variable was never actually
-    # mapper-specific, just named after whichever mapper existed first) is
-    # not hardcoded into the library's own tree -- the library only ever
-    # supplies a HELPER script (src/nes/mappers/mmc3-helper.ld: hardware
-    # facts and mechanical plumbing), never the actual, final linker script a
-    # real project links against (see BANKED_CALL_THEORY.txt's "THE FINAL
-    # LINKER SCRIPT MUST BE USER-MADE" section -- written against VRC1, but
-    # the principle is mapper-agnostic). The demo supplies its own top-level
-    # script (demo/link.ld) via local.cmake, matching LLVM_MOS_SDK's own "no
-    # fallback, missing is a hard configure-time error" convention just
-    # above -- see local.cmake.example.
     if(NOT TOPLEVEL_LD)
         message(FATAL_ERROR
             "NES build requires a top-level linker script, but TOPLEVEL_LD is "
@@ -105,53 +40,17 @@ if(TARGET_PLATFORM STREQUAL "nes")
             "That script should INCLUDE mmc3-helper.ld (src/nes/mappers) for "
             "the hardware/mechanical parts it doesn't need to reinvent.")
     endif()
-    # -L: GNU ld/lld's INCLUDE directive does NOT search the directory of the
-    # script doing the including -- only the linker's own -L search paths --
-    # so a top-level script's `INCLUDE mmc3-helper.ld` needs this to resolve
-    # at all.
     set(CMAKE_CXX_FLAGS "-T ${TOPLEVEL_LD} -L${CMAKE_SOURCE_DIR}/src/nes/mappers -Wno-unused-command-line-argument")
 
-    # Also needs to be this early, same reasoning as CMAKE_CXX_FLAGS above:
-    # the llvm-mos toolchain file (llvm-mos-toolchain.cmake) reads
-    # LLVM_MOS_PLATFORM to pick CMAKE_CXX_COMPILER -- mos-${LLVM_MOS_PLATFORM}-
-    # clang++ when set, a generic (and for this project's purposes, wrong --
-    # no NES-specific default include/library paths) mos-clang++ otherwise --
-    # and sets CMAKE_CXX_COMPILER_FORCED, so whichever it picks at the FIRST
-    # enable_language(CXX)/project() call is locked in for the rest of this
-    # configure, cached, never re-resolved later. Previously this was only
-    # set down in the "NES target" project() block, well after the
-    # uitk-export step's own enable_language(CXX) already ran -- meaning
-    # LLVM_MOS_PLATFORM was still unset at that point, and it silently locked
-    # in the generic mos-clang++, which has no NES sysroot and can't even
-    # find <cstdint>. Hardcoded to "nes" (mapper 4/MMC3, not NROM) here for
-    # the same reason the later project() block's own copy of this line was
-    # unconditional: TOPLEVEL_LD above is hardcoded to this one mapper too,
-    # nothing here branches on a second one yet.
     set(LLVM_MOS_PLATFORM nes)
 endif()
 
-# Application / SDL3 window title, compiled in as the PROJECT_NAME define.
-# Set PROJECT_NAME in local.cmake to override per-developer; a default keeps
-# the window titled when local.cmake is absent or leaves it unset.
-#
-# NOTE: this must stay ABOVE the project() calls below -- project() sets its
-# own PROJECT_NAME variable, which would otherwise clobber this value before
-# the define is created.
 if(NOT PROJECT_NAME)
     set(PROJECT_NAME "My pnes Game")
 endif()
 
-# Capture the title for the AppImage .desktop file's Name= (configure_file
-# substitutes @GAME_NAME@ in docker/demo.desktop.in). This must happen here,
-# before project() resets the PROJECT_NAME *variable* to "pnes":
-# appimagetool derives the output filename's prefix from Name=, and an empty
-# Name produces a "-x86_64.AppImage" argument that mksquashfs rejects as a flag.
-# project() does not touch GAME_NAME, so it survives to the linux block below.
 set(GAME_NAME "${PROJECT_NAME}")
 
-# Nametable mirroring orientation: pnes.hpp requires exactly one of
-# LANDSCAPE or PORTRAIT to be defined. Set ORIENTATION in local.cmake to
-# override per-developer; defaults to LANDSCAPE when left unset.
 if(NOT ORIENTATION)
     set(ORIENTATION "LANDSCAPE")
 endif()
@@ -162,51 +61,13 @@ endif()
 add_compile_definitions(${ORIENTATION})
 add_compile_definitions(PROJECT_NAME="${PROJECT_NAME}")
 
-# The library and demo are compiled as C++23. C++20 would cover the
-# designated initialisers used throughout, but the SDL3 backend relies
-# on <stdatomic.h>'s `atomic_int` (_vblank_flag), which only became
-# usable from C++ in C++23. The gnu++ dialect keeps the GNU compound-literal
-# extension the video/interrupt code uses. Both toolchains accept it:
-# llvm-mos's clang++ and host GCC.
-#
-# Raw -std=gnu++23, not CMAKE_CXX_STANDARD 23 + CMAKE_CXX_STANDARD_REQUIRED
-# ON + CMAKE_CXX_EXTENSIONS ON (what this used to be): that trio makes every
-# target's CXX_STANDARD property go through CMake's own compile-feature
-# verification (cmStandardLevelResolver::CompileFeatureKnown), which hard-
-# errors ("No known features for CXX compiler ...") for a compiler whose
-# reported version it doesn't recognize -- exactly llvm-mos's clang++, which
-# reports itself as Clang 23.0.0 (tracking upstream LLVM trunk's current
-# in-development major version, not a real numbered Clang release CMake's
-# compiled-in version table has ever seen). PASS1_ELF's own raw compiler
-# invocation further down already had to duplicate -std=gnu++23 explicitly
-# for the same reason (bypasses CMAKE_CXX_STANDARD entirely, per its own
-# comment) -- this just does that project-wide instead of trusting CMake's
-# standard-injection machinery to work for this toolchain at all.
 add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-std=gnu++23>)
 
 include(FetchContent)
 
-# ----------------------------------------------------------------------
-# stb — nothings/stb publishes no tags and rewrites master history (its
-# maintainer force-pushes amended commits), so tracking the branch broke
-# every CI job with a stale _deps clone: FetchContent re-fetches, then tries
-# to rebase the old master onto the rewritten one and dies on add/add
-# conflicts in every file. Pinning an explicit commit means a detached
-# checkout with no rebase, and makes the vorbis decoder we build against
-# reproducible. Bump this deliberately. GIT_SHALLOW is deliberately absent:
-# shallow-fetching a bare commit hash needs CMake 3.24+, and this project
-# only requires 3.21.
-# ----------------------------------------------------------------------
 set(STB_GIT_TAG "033efa1bcb750136ac98e997d53833b758e0089b"
         CACHE STRING "nothings/stb commit to fetch")
 
-# ----------------------------------------------------------------------
-# br0::intsh — header-only integer type aliases, used via #include <intsh>.
-# An INTERFACE target, so the same declaration serves both the NES and
-# desktop builds; FetchContent_MakeAvailable is called inside each branch
-# below (after project()), and the target is linked PUBLIC onto the
-# pnes library so the include dir propagates to the demo.
-# ----------------------------------------------------------------------
 FetchContent_Declare(
         intsh
         GIT_REPOSITORY https://github.com/brette-0/intsh.git
@@ -214,14 +75,6 @@ FetchContent_Declare(
         GIT_SHALLOW    TRUE
 )
 
-# ----------------------------------------------------------------------
-# br0::tuple — header-only freestanding tuple, used via #include <br0/tuple>.
-# SOURCE_SUBDIR points add_subdirectory at the repo's br0/ folder, which
-# defines just the br0::tuple INTERFACE target. This deliberately skips the
-# repo's top-level CMakeLists.txt, which hard-requires a machine-specific
-# cmake/local.cmake and builds the upstream test suite — neither of which we
-# want pulled into this build.
-# ----------------------------------------------------------------------
 FetchContent_Declare(
         tuple
         GIT_REPOSITORY https://github.com/brette-0/tuple.git
@@ -230,22 +83,6 @@ FetchContent_Declare(
         SOURCE_SUBDIR  br0
 )
 
-# ----------------------------------------------------------------------
-# br0::consh — header-only concept shorthands for integer types, used via
-# #include <consh>. A required library for every target, so it is fetched in
-# every TARGET_PLATFORM branch below -- including PS2/PS3, which shim intsh
-# rather than fetching it: consh only declares concepts inside
-# namespace br0::concepts, includes nothing but <type_traits> and carries no
-# `using namespace` of its own, so it has none of the global-typedef
-# collisions that made those shims necessary.
-#
-# Upstream is a single header at the repo root with no CMakeLists.txt, so
-# FetchContent_MakeAvailable() just populates it -- there is no upstream
-# target to link against. _make_consh_available() below wraps that
-# population and defines the br0::consh INTERFACE target this project links
-# instead; it is idempotent, since the same branch may reach it more than
-# once.
-# ----------------------------------------------------------------------
 FetchContent_Declare(
         consh
         GIT_REPOSITORY https://github.com/brette-0/consh.git
@@ -262,20 +99,6 @@ macro(_make_consh_available)
     endif()
 endmacro()
 
-# intsh and br0::tuple each declare their own INTERFACE
-# target_compile_features(... cxx_std_20) -- reasonable in isolation, but it
-# routes through CMake's own compile-feature verification
-# (cmStandardLevelResolver::CompileFeatureKnown) for whichever compiler ends
-# up consuming them, and that hard-errors ("No known features for CXX
-# compiler ...") for llvm-mos's clang++, which reports itself as Clang
-# 23.0.0 -- a version CMake's compiled-in version table doesn't recognize
-# (see this project's own -std=gnu++23 add_compile_options above, added for
-# the exact same reason). Can't fix this upstream in either repo from here
-# (they're fetched fresh into _deps/ on every clean configure, never part of
-# this source tree) -- instead, strip the property right after each fetch
-# makes the targets available: this project's own -std=gnu++23 already
-# guarantees at least as much as cxx_std_20 ever would, so nothing is
-# actually lost by no longer asking CMake to separately verify it.
 macro(_fixup_fetched_cxx_std_targets)
     if(TARGET intsh)
         set_property(TARGET intsh PROPERTY INTERFACE_COMPILE_FEATURES "")
@@ -285,130 +108,33 @@ macro(_fixup_fetched_cxx_std_targets)
     endif()
 endmacro()
 
-# ----------------------------------------------------------------------
-# uitk-export -- regenerates demo/gen/<name>/<target>/<name>.hpp|.cpp for
-# EVERY demo/ui/<name>.uis, by building and running tools/uitk (see
-# tools/uitk/README.md) once per scene file found by the glob below. The
-# output directory always matches the .uis file's own basename -- add a new
-# demo/ui/whatever.uis and it exports to demo/gen/whatever with no edit
-# needed here; there is no per-scene special-casing (gameOptions.uis used to
-# export to demo/gen/playOptions instead of demo/gen/gameOptions -- that
-# exception is gone, and every TARGET_PLATFORM branch below now globs
-# demo/gen/gameOptions/ to match). Runs here, at CONFIGURE time --
-# deliberately, not as a build-time target `demo` depends on: demo/gen/ is
-# gitignored, never committed, so every TARGET_PLATFORM branch's own
-# `file(GLOB DEMO_TITLE_SOURCES ...)` below has to see the regenerated files
-# BEFORE it globs, not after. A build-time custom target regenerates too
-# late for that -- CMake fixes a GLOB's matched file list into build.ninja
-# at configure time, so a custom target that adds/removes a title.cpp
-# mid-build leaves that already-baked build graph pointing at a file that
-# either isn't there yet or just disappeared. (That's exactly how this broke
-# once NES stopped needing a title.cpp at all -- Draw_/Erase_ moved to AI,
-# body merged into the header, so genCtTextBoxBody's NES output no longer
-# has any .cpp-side content, see tools/uitk/main.cpp. Only a second
-# `cmake --build`, which reconfigures and re-globs against the post-export
-# directory state, would have picked that up.) Running the export before
-# the globs, in the same configure pass, removes the need for that second
-# invocation.
+# uitk-export -- regenerates demo/gen/<scene>/<target>/ for every
+# demo/ui/*.uis, one nested cmake+run per scene. The output directory is the
+# .uis file's own basename, so a new scene needs no edit here.
 #
-# uitk is a standalone Qt Widgets app (tools/uitk/CMakeLists.txt), built here
-# via its own nested `cmake` invocation rather than add_subdirectory -- most
-# importantly, that means it's never built through *this* project's own
-# toolchain. That matters concretely for TARGET_PLATFORM=nes, which
-# points CMAKE_TOOLCHAIN_FILE at the llvm-mos cross-compiler above: a nested
-# `cmake -S tools/uitk -B ...` subprocess doesn't inherit that (it's never
-# passed along), so it always configures against the host's own compiler,
-# regardless of which platform this build itself targets. Placed here, ahead
-# of every project() call below, so find_package(Qt...) below also always
-# searches the host -- CMAKE_TOOLCHAIN_FILE's CMAKE_SYSTEM_NAME/sysroot
-# settings (set above, for nes) aren't actually applied by CMake
-# until the first project()/enable_language() call processes them.
+# Runs at CONFIGURE time, deliberately: demo/gen/ is gitignored, so each
+# platform branch's own file(GLOB) below has to see the regenerated files before
+# it globs. CMake bakes a GLOB's file list into the build graph at configure
+# time, so a build-time target that adds or removes a title.cpp leaves that
+# graph pointing at a file that is not there yet -- which is exactly how this
+# broke once NES stopped needing a title.cpp at all.
 #
-# Qt (Widgets) is only actually required when demo/gen/ doesn't already have
-# something to fall back to. With Qt: always regenerate, so a local build is
-# never stale after editing any demo/ui/*.uis. Without Qt: warn and use
-# whatever's already under demo/gen/ instead -- normally populated by CI's
-# `codegen-check` job's demo-gen artifact (.github/workflows/ci.yml; every
-# other platform job downloads it, deliberately so *those* never need Qt
-# themselves, since most of their Docker images/runners don't have it at
-# all), or by an earlier Qt-equipped local export. Only a genuinely empty
-# demo/gen/ with no Qt available is a hard configure error -- nothing to
-# build against at all.
-#
-# Re-runs whenever any demo/ui/*.uis or uitk's own sources change (see the
-# CMAKE_CONFIGURE_DEPENDS below) -- CMake already reconfigures automatically
-# on any CONFIGURE_DEPENDS-listed file changing, the same mechanism
-# file(GLOB ... CONFIGURE_DEPENDS) itself relies on, so a plain
-# `cmake --build <builddir>` after editing either picks it up with no
-# separate step to remember.
-#
-# enable_language(CXX) here, ahead of find_package(Qt...): Qt6Config.cmake
-# transitively find_package(Threads)s, and FindThreads asserts a language is
-# already enabled -- normally true by the time this ran (every branch below
-# calls project(pnes CXX) itself), but this block now runs before
-# all of them. Redundant, not conflicting, with each branch's own project()
-# call moments later (CMake tolerates re-enabling an already-enabled
-# language); for nes this does bind CXX to the llvm-mos cross
-# compiler already selected above via CMAKE_TOOLCHAIN_FILE, same as that
-# later project() call would anyway -- find_package(Qt...) itself doesn't
-# care which compiler got enabled, only that FindThreads' own assertion is
-# satisfied (CMAKE_SYSTEM_NAME=Generic sets no CMAKE_FIND_ROOT_PATH, so
-# nothing here restricts the search to a cross sysroot either way).
-#
-# Saved BEFORE enable_language(CXX): for nes, CMake's own compiler
-# enablement exports CXX (and, on some setups, CC) as real process
-# environment variables pointing at the just-identified compiler --
-# confirmed directly against this llvm-mos toolchain, not documented
-# behavior this comment previously assumed didn't apply. That's fine for
-# THIS process, but execute_process() below spawns nested `cmake`
-# subprocesses that inherit this same process's environment (regardless of
-# PATH, and regardless of nothing being passed as COMMAND arguments) -- so
-# without restoring these first, tools/uitk's own host-only configure
-# silently inherits CXX=<the NES cross-compiler> too and fails its own
-# compiler sanity check trying to link a plain host test program against
-# NES crt0.
+# Built through a nested cmake rather than add_subdirectory so it never goes
+# through this project's own toolchain: a nested invocation does not inherit
+# CMAKE_TOOLCHAIN_FILE, so uitk always configures against the host compiler.
+# Placed ahead of every project() call so find_package(Qt) searches the host
+# too. Without Qt it warns and uses whatever demo/gen/ already holds.
 set(_HOST_ENV_CXX "$ENV{CXX}")
 set(_HOST_ENV_CC "$ENV{CC}")
 enable_language(CXX)
-# What enable_language(CXX) just bound CXX/CC to (see this block's own
-# comment above) -- saved so the host-compiler swap below, around the
-# nested uitk subprocesses only, can be undone afterward. Every later
-# project()/enable_language(CXX) call in this file (inside each
-# TARGET_PLATFORM branch) needs CXX/CC still pointed at this, not left on
-# the host values the uitk swap leaves behind.
 set(_MOS_ENV_CXX "$ENV{CXX}")
 set(_MOS_ENV_CC "$ENV{CC}")
 
-# What every nested host-tool `cmake` below (tools/uitk, tools/blobman) must be
-# told explicitly, because a subprocess inherits NONE of it: a bare
-# `cmake -S <tool> -B <dir>` picks CMake's own built-in default generator, which
-# on any Unix host is "Unix Makefiles" -- regardless of this build being
-# configured with Ninja. On a machine (or Docker image) that has ninja but no
-# make, that nested configure dies with
-#
-#     CMake Error: CMake was unable to find a build program corresponding to
-#     "Unix Makefiles".  CMAKE_MAKE_PROGRAM is not set.
-#     CMake Error: CMAKE_CXX_COMPILER not set, after EnableLanguage
-#
-# (the second line is just the first one cascading -- no build tool means no
-# compiler check). Handing the nested configure this build's OWN generator, and
-# the program it drives, removes the guess entirely: whatever built this project
-# is by definition present. CMAKE_MAKE_PROGRAM is only forwarded when CMake
-# actually resolved one, so an unset cache entry is left for the nested
-# configure to resolve for itself rather than being pinned to an empty string.
 set(NESTED_HOST_CMAKE_ARGS -G "${CMAKE_GENERATOR}")
 if(CMAKE_MAKE_PROGRAM)
     list(APPEND NESTED_HOST_CMAKE_ARGS -DCMAKE_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM})
 endif()
 
-# Pinning the generator above has one consequence worth handling here rather
-# than in an error message: CMake refuses to reconfigure an existing build
-# directory under a different generator than the one that created it
-# ("does not match the generator used previously"). Any nested build dir left
-# behind by an earlier configure of this project predates that pin and is
-# therefore on the default generator, so it would now fail permanently until
-# someone deleted it by hand. Drop the stale cache instead -- these are
-# disposable host-tool build trees, nothing in them is worth preserving.
 macro(clear_nested_build_dir_on_generator_change dir)
     if(EXISTS "${dir}/CMakeCache.txt")
         file(STRINGS "${dir}/CMakeCache.txt" _NESTED_CACHED_GENERATOR
@@ -420,21 +146,6 @@ macro(clear_nested_build_dir_on_generator_change dir)
         unset(_NESTED_CACHED_GENERATOR)
     endif()
 endmacro()
-# On nes (and any other bare-metal preset whose toolchain file sets
-# CMAKE_SYSTEM_NAME to a non-host value, e.g. ps2/gc/wii/3ds), that value is
-# already latched in by enable_language(CXX) above by the time find_package
-# below runs in this same process. Qt5/6's own CMake config declares its
-# imported libraries SHARED, so add_library()'s generic "this platform
-# doesn't support dynamic linking" check fires for every one of them (~30
-# warnings) on any machine that actually has Qt installed -- spurious here,
-# since find_package below is a plain HOST tool lookup (for building
-# tools/uitk), not part of the cross-compile. These are CMake dev/author
-# warnings ("Warning (author)", "Use -Wno-author to suppress"); suppressing
-# them needs the real -Wno-dev behavior, which only takes effect from the
-# command line/presets (CMAKE_SUPPRESS_DEVELOPER_WARNINGS as a script-side
-# set() does NOT work -- confirmed empirically, despite what its docs
-# imply), so that's set via "warnings": {"dev": false} on CMakePresets.json's
-# _base preset instead of here.
 find_package(Qt6 QUIET COMPONENTS Widgets)
 if(NOT Qt6Widgets_FOUND)
     find_package(Qt5 QUIET COMPONENTS Widgets)
@@ -448,12 +159,6 @@ if(Qt6Widgets_FOUND OR Qt5Widgets_FOUND)
                  ${UITK_SOURCES}
                  ${CMAKE_SOURCE_DIR}/tools/uitk/CMakeLists.txt)
 
-    # Restore CXX/CC to whatever they were before enable_language(CXX) above
-    # (the host's default if the invoking shell never set them itself) --
-    # see that block's own comment. Every execute_process() below is a
-    # nested `cmake` subprocess that must configure/build tools/uitk against
-    # the HOST compiler, never whatever enable_language(CXX) just bound CXX
-    # to for TARGET_PLATFORM=nes.
     if(_HOST_ENV_CXX)
         set(ENV{CXX} "${_HOST_ENV_CXX}")
     else()
@@ -479,20 +184,7 @@ if(Qt6Widgets_FOUND OR Qt5Widgets_FOUND)
     if(NOT UITK_BUILD_RESULT EQUAL 0)
         message(FATAL_ERROR "uitk: failed to build (see output above).")
     endif()
-    # Targets whose viewport spans two stacked panels (video.hpp's TARGET_NDS /
-    # TARGET_CTR branches). A scene can supply demo/ui/<scene>_ds.uis to lay
-    # itself out differently on these -- the UI sits permanently on the bottom
-    # panel, so it needs none of the IRQ-split/fade machinery the single-screen
-    # layout uses -- and ONE such file covers all three, because its placement
-    # is written as VIEWPORT_*-relative expressions that resolve per target
-    # (DS/DSi 32x48, 3DS 50x60).
     set(UITK_DUAL_SCREEN_TARGETS DS DSI 3DS)
-    # One export per demo/ui/*.uis found above -- output dir is always that
-    # file's own basename (demo/ui/foo.uis -> demo/gen/foo/<target>/foo.hpp|.cpp),
-    # so a new scene file needs no edit here to start exporting. The one
-    # exception is a *_ds.uis variant: it is not a scene of its own, it is an
-    # overlay on its base scene, so it is skipped here and re-exported below
-    # under the BASE scene's name.
     foreach(UITK_SCENE_FILE ${UITK_SCENE_FILES})
         get_filename_component(UITK_SCENE_NAME ${UITK_SCENE_FILE} NAME_WE)
         if(UITK_SCENE_NAME MATCHES "_ds$")
@@ -508,15 +200,6 @@ if(Qt6Widgets_FOUND OR Qt5Widgets_FOUND)
             message(FATAL_ERROR "uitk: export failed for ${UITK_SCENE_FILE} (see output above).")
         endif()
 
-        # Overlay: if this scene ships a dual-screen variant, re-export it for
-        # the dual-screen targets ONLY, overwriting the base layout's output for
-        # those three. --name makes it export AS the base scene, so it lands at
-        # demo/gen/<scene>/{ds,dsi,3ds}/<scene>.hpp with the same
-        # `gen::<scene>` namespace as every other target -- demo/src keeps its
-        # single unchanged computed include and needs no per-target #if.
-        # Deliberately after the base export, not instead of it: the base run is
-        # what creates the other 8 targets' output, and overwriting only these
-        # three keeps a scene without a variant working exactly as before.
         set(UITK_SCENE_DS_FILE ${CMAKE_SOURCE_DIR}/demo/ui/${UITK_SCENE_NAME}_ds.uis)
         if(EXISTS ${UITK_SCENE_DS_FILE})
             foreach(UITK_DS_TARGET ${UITK_DUAL_SCREEN_TARGETS})
@@ -537,13 +220,6 @@ if(Qt6Widgets_FOUND OR Qt5Widgets_FOUND)
         endif()
     endforeach()
 
-    # Put CXX/CC back to what enable_language(CXX) above actually bound them
-    # to -- undoes the host-compiler swap just for the nested uitk
-    # subprocesses (see both this swap's own comment and the one on
-    # _MOS_ENV_CXX/_MOS_ENV_CC above). Every project()/enable_language(CXX)
-    # call from here on (inside each TARGET_PLATFORM branch below) must see
-    # CXX/CC pointed at the SAME compiler enable_language(CXX) already
-    # identified and cached, not the host swap.
     if(_MOS_ENV_CXX)
         set(ENV{CXX} "${_MOS_ENV_CXX}")
     else()
@@ -555,10 +231,6 @@ if(Qt6Widgets_FOUND OR Qt5Widgets_FOUND)
         unset(ENV{CC})
     endif()
 elseif(EXISTS ${CMAKE_SOURCE_DIR}/demo/gen/title AND EXISTS ${CMAKE_SOURCE_DIR}/demo/gen/gameOptions)
-    # STATUS, not WARNING: expected on every Docker/CI build (none of those
-    # images install Qt), so a WARNING here would just be permanent build
-    # noise. Still surfaced so a local configure without Qt says why it's
-    # using the checked-in demo/gen/ output instead of regenerating it.
     message(STATUS
         "Qt Widgets not found; using whatever's already under demo/gen/ "
         "instead of regenerating it from demo/ui/*.uis (e.g. a "
@@ -574,34 +246,6 @@ else()
         "demo-gen CI artifact).")
 endif()
 
-# ----------------------------------------------------------------------
-# blobman -- repacks demo/chr/chr.bin (the cartridge's single CHR ROM image)
-# and demo/chr/chr.h (the symbolic tile ids beside it) from the layout in
-# demo/chr/config.toml, by building and running tools/blobman.
-#
-# Runs here, at CONFIGURE time, for the same reason the uitk-export step above
-# does: the pair has to be current BEFORE anything compiles against it.
-# demo/chr/config.toml is listed in CMAKE_CONFIGURE_DEPENDS below, together
-# with blobman's own sources and every .chr under demo/chr/assets/, so editing
-# the manifest or any piece of art is treated exactly like editing code -- a
-# plain `cmake --build <builddir>` reconfigures, repacks, and then rebuilds
-# whatever that touched. chr.h is an ordinary header, so the compiler's own
-# depfiles pick up its dependents; chr.bin is reached by #embed from
-# demo/src/graphics/chr_rom.cpp, which each TARGET_PLATFORM branch below
-# already pins with OBJECT_DEPENDS.
-#
-# Unlike demo/gen/, both outputs are COMMITTED -- so there is always something
-# to fall back to, and a host that cannot build blobman at all (no network for
-# toml++, no compiler) is a STATUS message and the committed pair, not a
-# configure failure. CI's blobman-check job is what proves the committed pair
-# still matches the manifest and the art.
-#
-# Built via its own nested `cmake` invocation rather than add_subdirectory,
-# for all the reasons spelled out on the uitk block above -- chiefly that a
-# nested subprocess never inherits CMAKE_TOOLCHAIN_FILE, so blobman always
-# builds as the host tool it is even when this build targets nes. The
-# CXX/CC swap around it is that same block's swap, for that same reason: see
-# the comments on _HOST_ENV_CXX / _MOS_ENV_CXX above.
 file(GLOB_RECURSE BLOBMAN_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tools/blobman/*.cpp)
 file(GLOB_RECURSE BLOBMAN_ART CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/demo/chr/assets/*.chr)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
@@ -610,27 +254,6 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
              ${BLOBMAN_SOURCES}
              ${CMAKE_SOURCE_DIR}/tools/blobman/CMakeLists.txt)
 
-# Is there a HOST compiler to build blobman with at all? Asked here, before the
-# nested configure, because the answer is legitimately "no" on some of the
-# cross-build images: docker/Dockerfile.ps2 is Alpine with the prebuilt MIPS
-# EE/IOP toolchain and NOTHING else -- no build-base, so no c++/g++/clang++ on
-# PATH, only mips64r5900el-ps2-elf-g++ and friends. Letting the nested cmake
-# discover that for itself works (the fallback below catches it either way), but
-# it costs a wasted configure and spills
-#
-#     CMake Error at CMakeLists.txt:18 (project):
-#       No CMAKE_CXX_COMPILER could be found.
-#
-# into the log of a build that is actually fine -- an error that reads like a
-# broken PS2 toolchain while being nothing of the sort. Probing first turns that
-# into the one STATUS line further down that says what really happened.
-#
-# $ENV{CXX} wins when the invoking shell set it, matching what the nested
-# configure would honor anyway; otherwise this is the same c++/g++/clang++
-# search CMake itself would run. NO_CMAKE_FIND_ROOT_PATH because a cross
-# toolchain file may have set CMAKE_FIND_ROOT_PATH_MODE_PROGRAM to ONLY, which
-# would confine this search to the target sysroot -- the exact opposite of what
-# a host-tool lookup wants.
 if(_HOST_ENV_CXX)
     set(BLOBMAN_HOST_CXX "${_HOST_ENV_CXX}")
 else()
@@ -648,16 +271,8 @@ else()
     unset(ENV{CC})
 endif()
 
-# Release: this is a throwaway host tool run once per configure, and an
-# optimized toml++ parse is the difference between that being unnoticeable and
-# not. Quiet on success, loud on failure -- OUTPUT_QUIET is deliberately NOT
-# paired with ERROR_QUIET, so a compile error still reaches the log.
 if(BLOBMAN_HOST_CXX)
     clear_nested_build_dir_on_generator_change(${CMAKE_BINARY_DIR}/blobman-build)
-    # CMAKE_CXX_COMPILER is passed explicitly rather than left to the nested
-    # configure's own search: it is exactly what the probe above resolved, so
-    # the tool that gets built is the one this block decided on, and a second
-    # search under a cross-build environment cannot land somewhere else.
     execute_process(
             COMMAND ${CMAKE_COMMAND} -S ${CMAKE_SOURCE_DIR}/tools/blobman
                                      -B ${CMAKE_BINARY_DIR}/blobman-build
@@ -679,10 +294,6 @@ else()
     set(BLOBMAN_BUILD_RESULT 1)
 endif()
 
-# Why the pair could not be repacked, phrased for both message branches below.
-# One quoted string per case, deliberately: set() with several string arguments
-# makes a LIST, which prints with ';' separators where the spaces should be
-# once interpolated into a message.
 if(BLOBMAN_HOST_CXX)
     set(BLOBMAN_FALLBACK_REASON "tools/blobman failed to build with ${BLOBMAN_HOST_CXX} (see the output above -- most often no system toml++ and no network to fetch it)")
 else()
@@ -690,16 +301,6 @@ else()
 endif()
 
 if(BLOBMAN_BUILD_RESULT EQUAL 0)
-    # -v, always: the per-entry fill report ("entry: ui filled 832 of 1024
-    # bytes") is the only visibility into a hunk quietly running out of room,
-    # and the configure log is where that belongs -- same reasoning as
-    # blobman-check's own invocation in .github/workflows/ci.yml.
-    #
-    # Relative paths with demo/chr as the working directory, and that is not
-    # cosmetic: the manifest's own includes resolve against it, and blobman
-    # echoes the -i path verbatim into chr.h's provenance comment, so an
-    # absolute path here would rewrite the committed header on every machine
-    # and never match what CI diffs against.
     execute_process(
             COMMAND ${CMAKE_BINARY_DIR}/blobman-build/blobman
                     -i config.toml -o chr.bin -l cpp -v
@@ -712,10 +313,6 @@ if(BLOBMAN_BUILD_RESULT EQUAL 0)
             "this is not a toolchain fallback case, so it is fatal.")
     endif()
 elseif(EXISTS ${CMAKE_SOURCE_DIR}/demo/chr/chr.bin AND EXISTS ${CMAKE_SOURCE_DIR}/demo/chr/chr.h)
-    # STATUS, not WARNING: expected on the Docker/CI images that have no
-    # network for toml++'s FetchContent fallback, where a warning would just
-    # be permanent build noise. Still surfaced so a local configure says why
-    # it is compiling against the committed pair rather than a fresh pack.
     message(STATUS
         "blobman: ${BLOBMAN_FALLBACK_REASON}; using the committed "
         "demo/chr/chr.bin + chr.h instead of repacking them from "
@@ -732,54 +329,10 @@ else()
         "there.")
 endif()
 
-# ----------------------------------------------------------------------
-# animator-export -- regenerates demo/animations/gen/<metasprite>.hpp (the
-# pattern-byte tables demo/src reads a frame of animation out of) for EVERY
-# demo/animations/*.anim, from the project and the .msprite sidecars it names,
-# by building and running tools/animator's headless exporter (see
-# tools/animator/README.md).
-#
-# Runs here, at CONFIGURE time, for the same reason the uitk-export and
-# blobman steps above do: the headers have to be current BEFORE anything
-# compiles against them. The .anim, every .msprite, and the animator's own
-# sources are listed in CMAKE_CONFIGURE_DEPENDS below, so editing an animation
-# in the designer is treated exactly like editing code -- a plain
-# `cmake --build <builddir>` reconfigures, re-exports and rebuilds whatever
-# that touched. The generated headers are ordinary headers, so the compiler's
-# own depfiles take it from there.
-#
-# The pattern bytes are re-resolved from demo/chr/config.toml on every export
-# (see exporter.cpp), which is why this step sits AFTER blobman's: a CHR edit
-# renumbers tiles, and the animation data has to be regenerated against the
-# layout that was just packed, not the one the .msprite files were last saved
-# against.
-#
-# Like blobman's outputs and unlike demo/gen/, these headers are COMMITTED --
-# so a host that cannot build the exporter (no C++ compiler of its own, no
-# system toml++ and no network to fetch it) is a STATUS message and the
-# committed headers, not a configure failure. CI's animator-check job is what
-# proves those committed headers still match the project.
-#
-# ANIMATOR_GUI=OFF: the designer itself is a Qt app, and only the exporter is
-# wanted here. That target is deliberately Qt-free -- toml++ is its only
-# dependency -- so this step works on the cross-build images, none of which
-# have Qt (unlike the uitk-export step above, which needs it and falls back to
-# a CI artifact without it).
-#
-# Built via its own nested `cmake` invocation rather than add_subdirectory,
-# for all the reasons spelled out on the uitk block above. The CXX/CC host
-# swap around it is still in force here -- it is the blobman step's own swap,
-# undone just below this block.
-# GLOB, not GLOB_RECURSE: the animator's sources are flat, and recursing would
-# sweep up whatever a developer's own tools/animator/cmake-build-*/ holds --
-# moc output that is rewritten on every build, so every build would then
-# reconfigure this one.
+# animator-export -- the same arrangement as uitk-export above, for
+# demo/animations/*.anim. A separate target from the designer itself: no Qt, no
+# display server, so CI can run it.
 file(GLOB ANIMATOR_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tools/animator/*.cpp)
-# Every project under demo/animations/, and every .msprite any of their sidecar
-# folders holds -- globbed rather than listed, so adding a second .anim (or a
-# metasprite to an existing one) needs no edit here, exactly as a new
-# demo/ui/*.uis needs none in the uitk step above. GLOB_RECURSE for the
-# sidecars because the folder's name is the .anim's own business.
 file(GLOB ANIMATOR_PROJECTS CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/demo/animations/*.anim)
 file(GLOB_RECURSE ANIMATOR_METASPRITES CONFIGURE_DEPENDS
      ${CMAKE_SOURCE_DIR}/demo/animations/*.msprite)
@@ -789,10 +342,6 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
              ${ANIMATOR_SOURCES}
              ${CMAKE_SOURCE_DIR}/tools/animator/CMakeLists.txt)
 
-# Same host compiler the blobman step above probed for, and the same reasons
-# for probing rather than letting the nested configure find out for itself --
-# see that block's own comment. One probe serves both, since both are plain
-# host tools built in the same configure pass.
 if(BLOBMAN_HOST_CXX)
     clear_nested_build_dir_on_generator_change(${CMAKE_BINARY_DIR}/animator-build)
     execute_process(
@@ -808,9 +357,6 @@ else()
     set(ANIMATOR_CONFIGURE_RESULT 1)
 endif()
 
-# --target animator-export, not a bare build: ANIMATOR_GUI=OFF already means
-# the GUI is not a target of that build tree, and naming the one target this
-# step needs keeps it that way even if something else is added there later.
 if(ANIMATOR_CONFIGURE_RESULT EQUAL 0)
     execute_process(
             COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR}/animator-build
@@ -821,9 +367,6 @@ else()
     set(ANIMATOR_BUILD_RESULT 1)
 endif()
 
-# Why the headers could not be regenerated, phrased for both message branches
-# below -- one quoted string per case, for the same list-vs-string reason the
-# blobman block spells out.
 if(BLOBMAN_HOST_CXX)
     set(ANIMATOR_FALLBACK_REASON "tools/animator's exporter failed to build with ${BLOBMAN_HOST_CXX} (see the output above -- most often no system toml++ and no network to fetch it)")
 else()
@@ -833,21 +376,6 @@ endif()
 file(GLOB ANIMATOR_COMMITTED_HEADERS ${CMAKE_SOURCE_DIR}/demo/animations/gen/*.hpp)
 
 if(ANIMATOR_BUILD_RESULT EQUAL 0)
-    # Relative paths with the source tree as the working directory: the export
-    # log is read in the middle of CMake's own output, where an absolute path
-    # per line is noise. Nothing in the generated headers depends on it -- the
-    # banner names the project file, not the path it was reached by -- so this
-    # is cosmetic, unlike blobman's own relative invocation.
-    #
-    # No -v here: the default log already names every header it writes with
-    # the sizes baked into it, which is what a configure wants. -v adds every
-    # frame's pattern bytes and the sheet's own cell warnings -- the right
-    # thing when diagnosing wrong-looking sprites by hand, too much for every
-    # build. CI's animator-check job runs it verbose for exactly that reason.
-    # One export per project found above, all of them into the one gen folder:
-    # a header is named after its metasprite, and two projects with a
-    # metasprite of the same name would be refused by the exporter itself for
-    # the same reason it refuses two inside one project.
     foreach(ANIMATOR_PROJECT ${ANIMATOR_PROJECTS})
         file(RELATIVE_PATH ANIMATOR_PROJECT_RELATIVE ${CMAKE_SOURCE_DIR} ${ANIMATOR_PROJECT})
         execute_process(
@@ -866,9 +394,6 @@ if(ANIMATOR_BUILD_RESULT EQUAL 0)
         endif()
     endforeach()
 elseif(ANIMATOR_COMMITTED_HEADERS)
-    # STATUS, not WARNING, for the same reason the blobman fallback is: this is
-    # the expected path on every Docker/CI image without a host compiler or a
-    # way to get toml++, where a warning would be permanent build noise.
     message(STATUS
         "animator: ${ANIMATOR_FALLBACK_REASON}; using the committed "
         "demo/animations/gen/*.hpp instead of re-exporting them from "
@@ -897,42 +422,9 @@ else()
     unset(ENV{CC})
 endif()
 
-# ----------------------------------------------------------------------
-# NES target
-# ----------------------------------------------------------------------
 if(TARGET_PLATFORM STREQUAL "nes")
-    # NO nes_pal HERE ANY MORE. It existed to flip the former FRAMERATE axis (and with it the
-    # NES2.0 timing byte, the FamiStudio note tables and the SFX export mode) to
-    # the 50Hz answer at build time. None of those are build decisions now: the
-    # ROM measures the console at boot (src/nes/video.cpp's DetectRefresh),
-    # carries both halves of every framerate-dependent value, and declares
-    # itself Timing::MULTI. One NES ROM covers NTSC, PAL and Dendy, so a second
-    # configuration would differ from this one in nothing at all.
 
-    # CMAKE_CXX_FLAGS (-T/-L/TOPLEVEL_LD's own FATAL_ERROR guard) is set much
-    # earlier now, right after CMAKE_TOOLCHAIN_FILE near the top of this file
-    # -- see that block's own comment for why (the unconditional
-    # enable_language(CXX) the uitk-export step needs, further up still,
-    # turned out to need it too, not just project() below).
 
-    # ------------------------------------------------------------------
-    # Where the FamiStudio audio backend is placed. THIS BACKEND IS A PROJECT
-    # CHOICE, NOT A LIB ONE -- audio.hpp declares plain prototypes with no
-    # definition, and src/nes/audio/famistudio.cpp is the one .cpp that opts a
-    # project into FamiStudio specifically by defining them. It tags every one
-    # of its functions ::AUDIO_BANK, which expands to a section attribute
-    # naming PNES_AUDIO_SECTION. That section MUST be the same PRG-ROM
-    # bank the audio engine itself is assembled into -- see
-    # demo/famistudio_config.s's FAMISTUDIO_CA65_CODE_SEGMENT, which is the
-    # matching knob on the ca65 side. Placed together, famistudio.cpp reaches
-    # the engine with plain calls and contains no bank switching at all; a
-    # caller long-calls audio::Update() and both arrive mapped.
-    #
-    # NO DEFAULT, deliberately: a guessed section would place this module in
-    # whichever bank the library assumed and produce a wrong-bank call with no
-    # diagnostic. Unset is an #error in famistudio.cpp itself, the same "no
-    # silent fallback" stance TOPLEVEL_LD above takes.
-    # ------------------------------------------------------------------
     if(NOT PNES_AUDIO_SECTION)
         message(FATAL_ERROR
                 "PNES_AUDIO_SECTION is not set. It names the ELF section "
@@ -943,21 +435,6 @@ if(TARGET_PLATFORM STREQUAL "nes")
             PROPERTIES COMPILE_DEFINITIONS
             "PNES_AUDIO_SECTION=\"${PNES_AUDIO_SECTION}\"")
 
-    # ------------------------------------------------------------------
-    # Where the UI toolkit (src/all/extras/ui/*.cpp) is placed. Same
-    # treatment as audio's PNES_AUDIO_SECTION above: COMPULSORY,
-    # no default value. A default would silently place this module
-    # wherever the library guessed, which is exactly the
-    # wrong-bank-with-no-diagnostic failure this project's placement
-    # mechanism otherwise avoids everywhere else -- a project targeting
-    # NES has to make an explicit call for the UI module too, not just
-    # audio. Unlike audio, there is no external engine to co-locate with;
-    # this is required purely so the placement decision is never a silent
-    # guess.
-    #
-    # Covers every ui .cpp file as one group -- the whole toolkit moves or
-    # stays together, same as audio's single-module contract.
-    # ------------------------------------------------------------------
     if(NOT PNES_UI_SECTION)
         message(FATAL_ERROR
                 "PNES_UI_SECTION is not set. It names the ELF section "
@@ -970,22 +447,6 @@ if(TARGET_PLATFORM STREQUAL "nes")
             PROPERTIES COMPILE_DEFINITIONS
             "PNES_UI_SECTION=\"${PNES_UI_SECTION}\"")
 
-    # ------------------------------------------------------------------
-    # TITLE / SYSMEM: placement for uitk-generated UI code (and any other
-    # CREATE_SEGMENT_KEYWORD-built macro demo/src/banks.hpp hands out).
-    # SYSMEM mirrors mmc3.hpp's own ::SYSMEM (".sysmem", onboard system RAM,
-    # NOLOAD -- see mmc3-helper.ld) -- generated code can't just
-    # #include <pnes/mappers/mmc3.hpp> to get that macro (it isn't
-    # NES-mapper-specific and shouldn't couple to one), so it's fed in here
-    # instead, same as TITLE. DEMO-owned rather than library-owned like
-    # AUDIO/UI_SECTION above, so these aren't set_source_files_properties()'d
-    # onto a fixed file list -- a generated scene's header can be #included
-    # from any demo .cpp, so the definitions below go on the `demo` target as
-    # a whole (further down, once that target exists) instead. Compulsory,
-    # same "no silent guess" stance as AUDIO/UI_SECTION; see
-    # local.cmake.example for why these are bare/ALL_CAPS rather than
-    # PNES_*_SECTION-namespaced.
-    # ------------------------------------------------------------------
     if(NOT TITLE)
         message(FATAL_ERROR
                 "TITLE is not set. It names the ELF section uitk-generated "
@@ -998,26 +459,6 @@ if(TARGET_PLATFORM STREQUAL "nes")
                 "See local.cmake.example.")
     endif()
 
-    # ------------------------------------------------------------------
-    # Placement for the other modules that produce code. OPTIONAL, unlike
-    # audio's: audio MUST share a bank with the engine it plain-calls, so an
-    # unset section there is an #error. These have no such contract, so unset
-    # means "don't place it" -- today's behaviour, inlined into callers.
-    #
-    # Setting one is a real tradeoff and the module's own comment says so: the
-    # section only governs a function's out-of-line copy, and LTO will inline
-    # the body into a caller elsewhere regardless, so the keyword also carries
-    # noinline. That is why video:: is 2,097 bytes compiled alone and 0 bytes
-    # in the linked ROM today. Placement means giving up inlining for that
-    # module; the section variable being set IS the opt-in.
-    #
-    # Only modules worth moving get an entry. apu.cpp is register objects and
-    # technology.cpp is empty -- both compile to 0 bytes of text, so a section
-    # for them would name a place nothing goes. interrupts.cpp is excluded: its
-    # one function is a `jmp ($fffc)` reset trampoline that has to stay in the
-    # fixed bank. input.cpp is excluded too -- one ~40-byte function called
-    # every frame, so it is pinned inline (AI) rather than placed.
-    # ------------------------------------------------------------------
     foreach(_mod video)
         string(TOUPPER ${_mod} _MOD)
         if(PNES_${_MOD}_SECTION AND LLVM_MOS_PLATFORM STREQUAL "nes-nrom")
@@ -1036,71 +477,30 @@ if(TARGET_PLATFORM STREQUAL "nes")
         endif()
     endforeach()
 
-    # LLVM_MOS_PLATFORM itself is set much earlier now (right after
-    # CMAKE_TOOLCHAIN_FILE near the top of this file) -- see that block's own
-    # comment for why (CMAKE_CXX_COMPILER_FORCED locks in whatever it picks
-    # at the FIRST enable_language(CXX), and the uitk-export step's own call
-    # happens before this point).
     find_package(llvm-mos-sdk REQUIRED)
     project(pnes CXX)
     set(PLATFORM_DEFINE TARGET_NES "REGION=\"${REGION}\"")
 
-    # NROM has no bankswitching, so RESET has nowhere to "escape to" and
-    # stays plain int main(). Every other mapper needs its RESET/main pinned
-    # to the fixed bank (interrupts.hpp), since main is the code's one
-    # guaranteed-always-resident home base while everything else may be
-    # banked in and out from under it. LLVM_MOS_PLATFORM is this project's
-    # one source of truth for which mapper is being built, set just above.
     if(NOT LLVM_MOS_PLATFORM STREQUAL "nes-nrom")
         list(APPEND PLATFORM_DEFINE NES_MAPPER_BANKSWITCHED)
     endif()
 
-    # Mapper/submapper number for header.hpp's HEADER() macro (see
-    # nes2.cpp). This is the only mapper subtarget this branch currently
-    # builds (TOPLEVEL_LD is hardcoded above), so it's unconditional for now
-    # -- becomes an if/elseif alongside TOPLEVEL_LD once a second mapper
-    # subtarget exists, one MAPPER/SUBMAPPER pair per board.
     list(APPEND PLATFORM_DEFINE "MAPPER=4" "SUBMAPPER=0")
 
-    # Alternative nametable wiring (NES2.0 flags 6, bit 3 -- the "four-screen"
-    # bit): the board supplies its own nametable memory/routing instead of the
-    # console's default 2-way CIRAM mirror (see TVROM's extra VRAM chip, MMC5's
-    # ExRAM/fill-mode quadrant select, Sunsoft-4's CHR-as-nametable trick).
-    # header.hpp/nes2.hpp only ever tests this for non-zero-ness -- the value
-    # itself is not a hardware quantity read out of the header, just a knob a
-    # given board's glue code may interpret its own way. Set
-    # ALTERNATIVE_NAMETABLE in local.cmake to any non-zero value to set the
-    # bit; unset (the default) leaves it clear.
     if(DEFINED ALTERNATIVE_NAMETABLE)
         list(APPEND PLATFORM_DEFINE "ALTERNATIVE_NAMETABLE=${ALTERNATIVE_NAMETABLE}")
     endif()
 
-    # Save-file support (battery-backed PRG-NVRAM at $6000-$7FFF): SAVE_FILE in
-    # local.cmake. Appended to PLATFORM_DEFINE here, and NOT only to the
-    # project-wide target_compile_definitions near the end of this file,
-    # because the pass-1 ELF command below compiles demo/src/header.hpp by hand
-    # through PLATFORM_DEFINE_FLAGS -- and nes2.hpp's HEADER() derives the
-    # battery bit (NES2.0 flags 6, bit 1) from this define. Leave it out of
-    # pass 1 and the two passes emit different ROM headers.
-    #
-    # GATED ON TRUTHINESS, not DEFINED-ness, unlike ALTERNATIVE_NAMETABLE just
-    # above: src/nes/mappers/mmc3.cpp tests this one with #ifdef, so emitting
-    # SAVE_FILE=0 would read there as "saving is on". `set(SAVE_FILE 0)` in
-    # local.cmake therefore means off, exactly as leaving it unset does.
     if(SAVE_FILE)
         list(APPEND PLATFORM_DEFINE "SAVE_FILE=${SAVE_FILE}")
     endif()
 
-    # -D-prefixed form for the pass-1 custom command below, which invokes the
-    # compiler directly and so doesn't pick up target_compile_definitions.
     list(TRANSFORM PLATFORM_DEFINE PREPEND "-D" OUTPUT_VARIABLE PLATFORM_DEFINE_FLAGS)
 
     FetchContent_MakeAvailable(intsh tuple)
     _make_consh_available()
     _fixup_fetched_cxx_std_targets()
 
-    # FamiStudio sound engine sources are fetched directly from upstream
-    # to avoid vendoring a copy in the repository.
     set(FAMISTUDIO_DIR ${CMAKE_BINARY_DIR}/famistudio)
     set(FAMISTUDIO_BASE_URL "https://raw.githubusercontent.com/BleuBleu/FamiStudio/master/SoundEngine")
 
@@ -1120,43 +520,13 @@ if(TARGET_PLATFORM STREQUAL "nes")
                 ${FAMISTUDIO_DIR}/NoteTables/famistudio_note_table_pal_msb.bin)
     endif()
 
-    # Locate the ca65 assembler and llvm-readelf binary used below. ca65 is
-    # part of cc65 (a separate, system-installed toolchain) so it legitimately
-    # falls back to PATH. llvm-readelf ships with the SDK: NO_DEFAULT_PATH
-    # pins it to the SDK bin (derived from the NES compiler's own directory)
-    # so a PATH-resolved llvm-mos can never sneak in.
     find_program(CA65 ca65 HINTS "${CC65_DIR}/bin" "C:/cc65/bin" REQUIRED)
     get_filename_component(LLVM_MOS_BIN ${CMAKE_C_COMPILER} DIRECTORY)
     find_program(LLVM_READELF llvm-readelf
         HINTS "${LLVM_MOS_BIN}" NO_DEFAULT_PATH REQUIRED)
-    # Same SDK-pinned lookup as llvm-readelf above; used by the post-link
-    # space report (tools/report_space.cmake), which reads region geometry
-    # back out of the linker's own __space_* symbols.
     find_program(LLVM_NM llvm-nm
         HINTS "${LLVM_MOS_BIN}" NO_DEFAULT_PATH REQUIRED)
 
-    # ------------------------------------------------------------------
-    # lua_log_builder: reads log()'s zero-footprint metadata back out of the
-    # linked demo.elf (see include/pnes/logger.hpp) and writes
-    # logdata.lua next to demo.nes for tools/pnes.lua to load in Mesen.
-    #
-    # HOST-NATIVE, NOT CROSS-COMPILED: this whole configuration's own
-    # CMAKE_C_COMPILER/CMAKE_CXX_COMPILER are the 6502 cross-compiler (see
-    # this file's own NES-target comments above), but this tool has to run
-    # ON the machine building the ROM. It is therefore its own separate
-    # CMake project (tools/luaLogBuilder/CMakeLists.txt), configured and
-    # built here via a NESTED cmake invocation using ${CMAKE_COMMAND} with
-    # no toolchain/compiler cache variables forwarded, so it picks up the
-    # host's own default compiler exactly like a standalone `cmake -S/-B`
-    # invocation would -- never the mos cross-compiler this project's own
-    # targets use.
-    #
-    # BUILT BEFORE ANY PROJECT NES SOURCE COMPILES: add_dependencies() below
-    # pins this ahead of pnes, the first target that compiles any of
-    # this project's or a consuming project's own NES C++ -- not because the
-    # engine's own source needs the tool, but so a developer never watches a
-    # full NES build finish only to have logdata.lua generation fail or be
-    # silently skipped at the very end.
     set(LUA_LOG_BUILDER_SRC ${CMAKE_SOURCE_DIR}/tools/luaLogBuilder)
     set(LUA_LOG_BUILDER_BUILD ${LUA_LOG_BUILDER_SRC}/build)
     set(LUA_LOG_BUILDER_BIN ${LUA_LOG_BUILDER_BUILD}/lua_log_builder)
@@ -1172,22 +542,6 @@ if(TARGET_PLATFORM STREQUAL "nes")
     )
     add_custom_target(lua_log_builder_tool DEPENDS ${LUA_LOG_BUILDER_BIN})
 
-    # demo/famistudio_config.s is the REAL, project-owned FamiStudio config
-    # file (see its own header comment, and BANKED_CALL_THEORY.txt's
-    # "RESOLVED: famistudio_config.s moves to the demo root as a real,
-    # directly-edited file" -- this used to be a CMake-generated string
-    # instead, which is what that entry flags as the thing to fix). CMake's
-    # own job here is reduced to READING values back out of that real file
-    # (regex-extracted, never written) so famistudio.cpp's #if FAMISTUDIO_CFG_*
-    # checks stay in sync with whatever this file actually says -- editing
-    # the .s file is what changes the engine's real configuration; these
-    # extracted CMake variables can never drift from it because they're read
-    # from it, not a separate source.
-    #
-    # THE CODE SEGMENT IS THE ONE EXCEPTION, and runs the other way: it is
-    # not a free choice of that file's, it MUST equal the section the audio
-    # module is compiled into, so it is derived from
-    # PNES_AUDIO_SECTION and fed in (see the encoder further down).
     file(READ ${CMAKE_SOURCE_DIR}/demo/famistudio_config.s FAMISTUDIO_CONFIG_TEXT)
 
     macro(famistudio_extract var pattern)
@@ -1202,17 +556,6 @@ if(TARGET_PLATFORM STREQUAL "nes")
     famistudio_extract(FAMISTUDIO_CFG_SFX_SUPPORT  "FAMISTUDIO_CFG_SFX_SUPPORT[ \t]*=[ \t]*([0-9]+)")
     famistudio_extract(FAMISTUDIO_USE_VOLUME_TRACK "FAMISTUDIO_USE_VOLUME_TRACK[ \t]*=[ \t]*([0-9]+)")
 
-    # SFX_STREAMS is NOT extracted: it goes the other way. The engine's stream
-    # count and the count the C++ side publishes as audio::sfxChannels have to
-    # be one number -- a project addressing channel 2 when the engine allocated
-    # two streams writes past the array, with no diagnostic on the NES, which
-    # does not bound-check the argument by design. So it is configured HERE and
-    # fed BOTH ways: to ca65 as -D PNES_SFX_STREAMS (numeric, which is all
-    # ca65's -D carries) and to the compiler as FAMISTUDIO_CFG_SFX_STREAMS.
-    # Same treatment, and the same justification, as the audio segment -- see
-    # famistudio_config.s's header on why those two are the exceptions to that
-    # file owning its own values. (NTSC/PAL support used to be a third; it is
-    # not fed in any more, since both tables now go in unconditionally.)
     set(PNES_SFX_STREAMS 2 CACHE STRING
             "FamiStudio SFX streams: how many effects the NES can play at once \
 (1-4). Published to C++ as audio::sfxChannels and to the engine as \
@@ -1225,19 +568,6 @@ FAMISTUDIO_CFG_SFX_STREAMS, so the two cannot disagree.")
     endif()
     set(FAMISTUDIO_CFG_SFX_STREAMS ${PNES_SFX_STREAMS})
 
-    # BOTH, ALWAYS -- no longer derived from the former FRAMERATE axis. These mirror what
-    # demo/famistudio_config.s now sets unconditionally, and the two still have
-    # to agree, which is why they are stated here as well.
-    #
-    # This used to be 1/0 flipped by FRAMERATE, with a FATAL_ERROR below
-    # refusing the both-enabled case because "DUAL mode requires a runtime
-    # region detection routine that this project does not yet provide". It does
-    # now: src/nes/video.cpp measures the frame length off PPUSTATUS at boot
-    # into video::is50Hz (that function's own comment has the cycle counts), and
-    # demo/src/main.cpp hands it to audio::Init, which is what reaches
-    # famistudio_init's region argument. So the guard is gone and both tables go
-    # in -- the ROM cost of the second one buys a build that plays at the right
-    # rate in whichever console it ends up in.
     set(FAMISTUDIO_CFG_NTSC_SUPPORT 1)
     set(FAMISTUDIO_CFG_PAL_SUPPORT 1)
 
@@ -1249,31 +579,10 @@ FAMISTUDIO_CFG_SFX_STREAMS, so the two cannot disagree.")
                 DESTINATION ${CMAKE_BINARY_DIR}/famistudio_include)
     endif()
 
-    # ------------------------------------------------------------------
-    # PNES_AUDIO_SECTION -> ca65 segment name.
-    #
-    # famistudio.cpp's ::AUDIO_BANK and FamiStudio's FAMISTUDIO_CA65_CODE_SEGMENT
-    # must name the SAME bank -- that shared placement is the entire reason
-    # famistudio.cpp can plain-call famistudio_update() and carry no bank
-    # switching. Two hand-written literals could drift apart silently and
-    # produce a cross-bank call with no diagnostic, so there is only one:
-    # local.cmake's readable ".prg_rom_audio", which link.ld and banks.hpp
-    # already use, with the ca65 spelling GENERATED from it here.
-    #
-    # ld.lld's XO65 reader treats '_' in a ca65 segment name as an escape
-    # character, so ".prg_rom_audio" is spelled "_pprg__rom__audio" -- every
-    # literal '_' doubled, '.' as "_p" -- plus a "_fx" suffix marking the
-    # ELF section executable. Escape literals FIRST or the "_p" introduced by
-    # the second replace would itself get doubled by the first.
-    # demo/famistudio_config.s documents the full escape table.
-    # ------------------------------------------------------------------
     string(REPLACE "_" "__" FAMISTUDIO_SEGMENT "${PNES_AUDIO_SECTION}")
     string(REPLACE "." "_p" FAMISTUDIO_SEGMENT "${FAMISTUDIO_SEGMENT}")
     set(FAMISTUDIO_SEGMENT "${FAMISTUDIO_SEGMENT}_fx")
 
-    # file(CONFIGURE) rather than file(WRITE): it leaves the file untouched
-    # when the content is unchanged, so a re-configure doesn't bump the
-    # timestamp and force a needless reassembly through the DEPENDS below.
     set(PNES_AUDIO_SEGMENT_INC
             ${CMAKE_BINARY_DIR}/famistudio_include/pnes_audio_segment.inc)
     file(CONFIGURE OUTPUT ${PNES_AUDIO_SEGMENT_INC} CONTENT
@@ -1282,28 +591,11 @@ FAMISTUDIO_CFG_SFX_STREAMS, so the two cannot disagree.")
 .define PNES_AUDIO_SEGMENT ${FAMISTUDIO_SEGMENT}
 ")
 
-    # Assemble the real, project-owned config once. There is no longer a
-    # separate "pass 1 without padding, pass 2 with padding" split -- see
-    # the measurement step below for why: it was already a permanent no-op,
-    # so building the exact same content twice bought nothing. The one
-    # object below is used both for the diagnostic measurement link and the
-    # real demo link.
     set(FAMISTUDIO_OBJ ${CMAKE_BINARY_DIR}/famistudio.o)
     add_custom_command(
             OUTPUT ${FAMISTUDIO_OBJ}
             COMMAND ${CA65}
-            # No -D FRAMERATE here any more (and no such variable now at all):
-            # famistudio_config.s stopped
-            # deriving its NTSC/PAL support flags from it (both are now
-            # unconditionally 1, selected at runtime instead), and nothing else
-            # in the assembly reads it. Leaving a dead -D in place would read
-            # as though the engine still keyed off the build's region.
             -D PNES_SFX_STREAMS=${PNES_SFX_STREAMS}
-            # Switches famistudio_config.s from its standalone literal
-            # fallback to the generated pnes_audio_segment.inc. ca65's -D
-            # takes NUMERIC symbols only ("Invalid definition" otherwise),
-            # so the segment name itself cannot travel this way -- this flag
-            # only selects which branch of the .ifdef there is taken.
             -D PNES_AUDIO_SEGMENT_INC=1
             -I ${CMAKE_SOURCE_DIR}/demo
             -I ${CMAKE_BINARY_DIR}/famistudio_include
@@ -1316,23 +608,6 @@ FAMISTUDIO_CFG_SFX_STREAMS, so the two cannot disagree.")
             COMMENT "Assembling FamiStudio"
     )
 
-    # demo/audio/bgm.fms and demo/audio/sfx.fms (the real FamiStudio projects,
-    # edited in the FamiStudio GUI) are the one source of truth for this demo's
-    # audio -- demo/audio/tracks/nes_audio.s and demo/audio/sfx/nes_sfx.s are
-    # regenerated build artifacts, not hand-edited, so they're re-exported here
-    # from the .fms files on every build where a project changed rather than
-    # trusted as stale committed copies. FamiStudio ships its own CLI under this
-    # same binary name (case as installed -- "famistudio" on Linux packages,
-    # "FamiStudio"/"FamiStudio.exe" on macOS/Windows).
-    #
-    # TWO projects, not one, because FamiStudio has no separate "sound effect"
-    # object: its SFX exporter re-encodes whole SONGS as effect streams. Point
-    # it at a project holding real music and every track comes back as one
-    # enormous "effect". Selecting songs within a single project is possible
-    # (-export-songs: takes zero-based indices) but the indices are positional,
-    # so reordering a song in the GUI would silently repoint both exports --
-    # splitting the projects means each export takes its whole input and needs
-    # no index list at all. FamiStudio's own demo splits the same way.
     find_program(FAMISTUDIO NAMES famistudio FamiStudio REQUIRED)
 
     set(NES_BGM_FMS ${CMAKE_SOURCE_DIR}/demo/audio/bgm.fms)
@@ -1345,78 +620,20 @@ FAMISTUDIO_CFG_SFX_STREAMS, so the two cannot disagree.")
             COMMENT "Exporting FamiStudio music: bgm.fms -> nes_audio.s (ca65)"
     )
 
-    # Same seam for the effects, which USED to be the region-baked half of this
-    # while song data was not. The exported `sounds` table opens with a two-word
-    # header -- NTSC table, then PAL table -- and -famistudio-asm-sfx-mode:
-    # decides which of the two actually holds data. The engine picks a slot by
-    # region at init, so a single-mode export built for the other region still
-    # links and still plays, just at the wrong rate, with no diagnostic
-    # anywhere.
-    #
-    # DUAL now, for the same reason both engine note tables are in: the region
-    # is measured at boot (video::is50Hz), so the build has no business deciding
-    # it, and a single-mode export would reintroduce exactly the silent
-    # wrong-rate failure above on any console that is not the one it was built
-    # for. Both tables hold data and the engine indexes the right one.
-    #
-    # STILL IN THE BINARY DIR, but no longer for the original reason. That was
-    # that region-dependent output cannot live at a region-independent path:
-    # with separate nes and nes_pal configurations sharing one source tree, a
-    # generated demo/audio/sfx/nes_sfx.s would be written by whichever built
-    # last and then found "newer than sfx.fms", hence up to date, by the other
-    # -- silently linking NTSC effects into a PAL ROM or the reverse. Both of
-    # that hazard's preconditions are gone: the export is DUAL (identical
-    # whatever the configuration), and there is only one NES configuration left
-    # to collide with anyway. What keeps it here is the remaining benefit --
-    # being outside demo/ keeps it out of the source .s glob below with no
-    # exclusion needed, unlike nes_audio.s. Named sfx.s rather than nes_sfx.s
-    # because a build dir is always a NES build dir; the prefix distinguished
-    # nothing.
     set(NES_SFX_FMS ${CMAKE_SOURCE_DIR}/demo/audio/sfx.fms)
     set(NES_SFX_ASM ${CMAKE_BINARY_DIR}/sfx.s)
     set(NES_SFX_MODE dual)
-    # SECOND OUTPUT, not a byproduct: -famistudio-asm-sfx-generate-list makes
-    # the exporter write the effect NAME->index mapping beside the data, and
-    # the filename is the exporter's choice, not ours -- it is the output path
-    # with its extension dropped and "_sfxlist.inc" appended. Naming it as an
-    # OUTPUT is what lets the enum step below depend on it directly.
     set(NES_SFX_LIST ${CMAKE_BINARY_DIR}/sfx_sfxlist.inc)
     add_custom_command(
             OUTPUT ${NES_SFX_ASM} ${NES_SFX_LIST}
             COMMAND ${FAMISTUDIO} ${NES_SFX_FMS} famistudio-asm-sfx-export ${NES_SFX_ASM}
                     -famistudio-asm-format:ca65
                     -famistudio-asm-sfx-mode:${NES_SFX_MODE}
-                    # NOT -famistudio-ASM-sfx-generate-list, which is what
-                    # `famistudio -help` prints and what the other options in
-                    # this command really are spelled. The CLI tests this one
-                    # with HasOption($"{engineName}-sfx-generate-list"), with
-                    # no "asm-", while the mode option beside it uses
-                    # ParseOption($"{engineName}-asm-sfx-mode") -- so the
-                    # documented spelling parses as an unknown option, is
-                    # ignored WITHOUT a diagnostic, and the export still
-                    # succeeds minus its list file. Verified both ways against
-                    # the installed CLI; upstream's help text is simply wrong.
                     -famistudio-sfx-generate-list
             DEPENDS ${NES_SFX_FMS}
             COMMENT "Exporting FamiStudio SFX: sfx.fms -> sfx.s + sfx_sfxlist.inc (ca65, ${NES_SFX_MODE})"
     )
 
-    # ------------------------------------------------------------------
-    # Effect names -> C++ enum, so call sites pass sfx::select, not 1.
-    #
-    # The transform lives in tools/sfx_list_to_hpp.cmake rather than here:
-    # it is NES-only (the indices describe one FamiStudio export; non-NES
-    # backends index a project's own audio::SetSfx table instead), and it is
-    # pure text work with no business in the middle of a platform branch.
-    # See that file's header for the format it reads and why generating the
-    # names beats hand-writing them.
-    #
-    # A BUILD STEP, NOT A CONFIGURE STEP, because its input does not exist at
-    # configure time -- sfx_sfxlist.inc is written by the export above, which
-    # runs during the build. Hence `cmake -P` driven by a custom command,
-    # the same shape tools/measure_sections.cmake and cmake/ps2_check_adpcm_size
-    # .cmake already use, rather than a file(STRINGS) read up here.
-    # ------------------------------------------------------------------
     set(NES_SFX_LIST_HPP ${CMAKE_BINARY_DIR}/gen/sfx.hpp)
     add_custom_command(
             OUTPUT ${NES_SFX_LIST_HPP}
@@ -1428,37 +645,14 @@ FAMISTUDIO_CFG_SFX_STREAMS, so the two cannot disagree.")
                     ${CMAKE_SOURCE_DIR}/tools/sfx_list_to_hpp.cmake
             COMMENT "Generating sfx.hpp from sfx_sfxlist.inc (effect name enum)"
     )
-    # NOTE: nothing DEPENDS on ${NES_SFX_ASM} yet, so this command does not
-    # actually fire -- the generated-file dependency that drives it (the
-    # assembly loop's DEPENDS, below, which lists ${NES_AUDIO_ASM} for the music
-    # wrapper) is still an open question.
 
-    # demo/famistudio_config.s is handled explicitly above (assembled once
-    # into FAMISTUDIO_OBJ) -- excluded here so it isn't ALSO picked up and
-    # assembled a second time by this generic "every hand-written .s file"
-    # loop, which would produce a second object defining the same symbols.
     file(GLOB_RECURSE DEMO_ASM_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/demo/*.s)
     list(REMOVE_ITEM DEMO_ASM_SOURCES ${CMAKE_SOURCE_DIR}/demo/famistudio_config.s)
-    # nes_audio.s (the generated song export) is assembled ONLY through its
-    # wrapper, demo/audio/tracks/nes_audio_bank.s, which opens the target
-    # PRG-ROM bank's segment and .includes it -- see that file's own comment.
-    # Assembling it directly here as well would define every music symbol
-    # twice, exactly the clash famistudio_config.s is excluded for above.
     list(REMOVE_ITEM DEMO_ASM_SOURCES ${NES_AUDIO_ASM})
-    # The SFX export needs no equivalent exclusion: it is written to the BINARY
-    # dir (see NES_SFX_ASM above for why) and so never appears in this
-    # source-tree glob at all.
     set(DEMO_ASM_OBJECTS "")
     foreach(ASM_SRC ${DEMO_ASM_SOURCES})
         get_filename_component(ASM_NAME ${ASM_SRC} NAME_WE)
         set(ASM_OBJ ${CMAKE_BINARY_DIR}/${ASM_NAME}.o)
-        # The SFX export is reached ONLY from here. add_custom_command(OUTPUT)
-        # declares a rule, it does not schedule one: with nothing in the graph
-        # asking for ${NES_SFX_ASM}, FamiStudio would never run and the file
-        # nes_sfx_bank.s .includes would simply not exist, failing assembly.
-        # So this dependency is what CREATES the file, not merely what keeps it
-        # fresh -- and it hangs off the ONE object that includes it rather than
-        # off all of them, unlike ${NES_AUDIO_ASM} below.
         set(ASM_EXTRA_DEPS "")
         if(ASM_SRC STREQUAL "${CMAKE_SOURCE_DIR}/demo/audio/sfx/nes_sfx_bank.s")
             set(ASM_EXTRA_DEPS ${NES_SFX_ASM})
@@ -1468,21 +662,11 @@ FAMISTUDIO_CFG_SFX_STREAMS, so the two cannot disagree.")
                 COMMAND ${CA65}
                 -I ${FAMISTUDIO_DIR}
                 -I ${FAMISTUDIO_DIR}/NoteTables
-                # nes_audio_bank.s .includes the generated nes_audio.s from
-                # this directory; ca65 resolves .include against its -I paths.
                 -I ${CMAKE_SOURCE_DIR}/demo/audio/tracks
                 -I ${CMAKE_SOURCE_DIR}/demo/audio/sfx
-                # nes_sfx_bank.s .includes the GENERATED sfx.s, which lives in
-                # the binary dir rather than beside its wrapper -- see
-                # NES_SFX_ASM above for why that output is per-build-dir.
                 -I ${CMAKE_BINARY_DIR}
                 -o ${ASM_OBJ}
                 ${ASM_SRC}
-                # NES_AUDIO_ASM: the wrapper's .include makes every music
-                # object depend on the generated export, which no scan of
-                # ${ASM_SRC} alone would reveal. ASM_EXTRA_DEPS carries the
-                # same relationship for the SFX export, narrowed to the single
-                # object that has it -- see its comment above.
                 DEPENDS ${ASM_SRC} ${NES_AUDIO_ASM} ${ASM_EXTRA_DEPS}
                 COMMENT "Assembling ${ASM_NAME}"
         )
@@ -1490,33 +674,11 @@ FAMISTUDIO_CFG_SFX_STREAMS, so the two cannot disagree.")
     endforeach()
 
     file(GLOB_RECURSE NES_SOURCES CONFIGURE_DEPENDS src/nes/*.cpp src/all/*.cpp)
-    # This build targets MMC3 only (TOPLEVEL_LD/MAPPER above) -- vrc1.cpp
-    # still exists for a VRC1 project to use, but it also defines a global
-    # extern "C" _reset (and other symbols mmc3.cpp defines too), which the
-    # glob above would otherwise hand to this same static library: since
-    # nothing in an MMC3 build references anything vrc1.cpp provides,
-    # leaving it in costs nothing at RUNTIME, but a duplicate-_reset link
-    # error is a real risk the moment anything ELSE in the link happens to
-    # pull that archive member in. Excluded here, the same pattern already
-    # used above for famistudio_config.s's own glob -- becomes conditional
-    # (alongside MAPPER/TOPLEVEL_LD) once a real "pick your mapper" build
-    # option exists instead of this hardcoded single-target branch.
     list(REMOVE_ITEM NES_SOURCES ${CMAKE_SOURCE_DIR}/src/nes/mappers/vrc1.cpp)
     add_library(pnes STATIC ${NES_SOURCES})
 
-    # lua_log_builder built and ready before any project NES source compiles
-    # -- see this file's own comment on lua_log_builder_tool, above.
     add_dependencies(pnes lua_log_builder_tool)
 
-    # Unconditional, in every build type -- not just nes-debug. log()'s whole
-    # LMA-resolution scheme (include/pnes/logger.hpp, tools/pnes.lua)
-    # depends on DWARF's .debug_line table to turn a log() call site's
-    # __FILE__/__LINE__ into a real address; without -g that table doesn't
-    # exist and every log point silently resolves to nothing. This costs
-    # nothing in the shipped ROM either way: debug sections carry no
-    # SHF_ALLOC flag, so they were never going to reach a MEMORY region or
-    # get copied into demo.nes by objcopy regardless of build type -- the
-    # only thing -g grows is demo.nes.elf, which is not what ships.
     target_compile_options(pnes PUBLIC -g)
 
     target_include_directories(pnes PUBLIC
@@ -1524,15 +686,6 @@ FAMISTUDIO_CFG_SFX_STREAMS, so the two cannot disagree.")
             ${CMAKE_SOURCE_DIR}/include/umbrella
             ${CMAKE_BINARY_DIR}/famistudio_include
     )
-    # ONE LIST, because two compile paths see pnes/audio.hpp: the `pnes` and
-    # `demo` targets (which inherit these as PUBLIC definitions), and the
-    # hand-rolled PASS1_ELF compiler invocation further down, which bypasses
-    # every CMake target property and so inherits nothing. audio.hpp's
-    # audio::sfxChannels #errors without FAMISTUDIO_CFG_SFX_STREAMS -- on
-    # purpose, since a guessed channel count is worse than a stopped build --
-    # which makes a path that forgets these a hard failure rather than a
-    # subtle one. Exactly the reasoning DEMO_PLACEMENT_DEFINES below is
-    # written up with; same trap, same fix, one list each.
     set(FAMISTUDIO_CFG_DEFINES
             FAMISTUDIO_CFG_NTSC_SUPPORT=${FAMISTUDIO_CFG_NTSC_SUPPORT}
             FAMISTUDIO_CFG_PAL_SUPPORT=${FAMISTUDIO_CFG_PAL_SUPPORT}
@@ -1546,35 +699,14 @@ FAMISTUDIO_CFG_SFX_STREAMS, so the two cannot disagree.")
     target_compile_definitions(pnes PUBLIC
             ${PLATFORM_DEFINE}
             ${FAMISTUDIO_CFG_DEFINES}
-            # No FAMISTUDIO_SEGMENT here: famistudio.cpp used to need the engine's
-            # segment name for a BANKED_EXTERN tag, and no longer does
-            # anything with it -- it reaches the engine with a plain call now
-            # that the two share a bank by construction (see the encoder
-            # above). PNES_AUDIO_SECTION is the only placement value
-            # the C++ side still takes, and it goes to famistudio.cpp alone.
     )
     target_link_libraries(pnes PUBLIC br0::intsh br0::tuple br0::consh)
 
-    # TITLE/TITLE_DATA/SYSMEM, once as a list so both compile paths that see
-    # demo/*.cpp stay in sync: the real `demo` target below (normal
-    # target_compile_definitions), AND the hand-rolled PASS1_ELF compiler
-    # invocation just below, which bypasses every CMake target property
-    # (its own comment explains why) and so does NOT inherit anything set on
-    # `demo` -- these have to be threaded through explicitly as raw -D flags
-    # or uitk-generated demo/ui/**/*.cpp fails this diagnostic build with the
-    # very #error guards TITLE/SYSMEM exist to produce. GEN_TARGET_DIR (below,
-    # -DGEN_TARGET_DIR=nes on the PASS1_ELF command line itself, since it's
-    # the one define here that's NOT also needed by demo/src/banks.hpp) is
-    # the same story: title.cpp's own #error guard on it exists for exactly
-    # this reason -- catch a compile path that forgot it, loudly, instead of
-    # a confusing "file not found" from the #include STRCAT(...) below it.
-    # OPTIONS/OPTIONS_DATA: same mechanism as TITLE/TITLE_DATA above
-    # (uitk-generated demo/gen/options/*/options.hpp needs them as whole
-    # compile definitions, not a header include), but with no local.cmake
-    # variable behind them -- the options scene has no per-developer bank
-    # choice, it always lives in demo/link.ld's own dedicated prg_rom_options
-    # bank (one of the named placeholder banks carved out when PRG-ROM was
-    # doubled to 256 KiB), so the section name is a literal here instead.
+    # Threaded through as raw -D flags as well as target_compile_definitions,
+    # because the hand-rolled PASS1_ELF invocation below bypasses every CMake
+    # target property and so inherits nothing set on `demo`. Without them the
+    # generated sources fail that diagnostic build on the very #error guards
+    # these defines exist to satisfy.
     set(DEMO_PLACEMENT_DEFINES
             "TITLE=CREATE_SEGMENT_KEYWORD(\"${TITLE}\")"
             "TITLE_DATA=CREATE_SEGMENT_KEYWORD(\"${TITLE}.rodata\")"
@@ -1583,10 +715,6 @@ FAMISTUDIO_CFG_SFX_STREAMS, so the two cannot disagree.")
             "OPTIONS_DATA=CREATE_SEGMENT_KEYWORD(\".prg_rom_options.rodata\")")
     list(TRANSFORM DEMO_PLACEMENT_DEFINES PREPEND "-D" OUTPUT_VARIABLE DEMO_PLACEMENT_FLAGS)
 
-    # demo/gen/title/ holds one uitk-generated title.cpp per console, all
-    # sharing the same gen::title:: symbol names -- glob only the one this
-    # target actually builds, or every other platform's title.cpp comes
-    # along too and the linker sees duplicate symbols for all of them.
     file(GLOB_RECURSE DEMO_C_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/demo/*.cpp)
     list(FILTER DEMO_C_SOURCES EXCLUDE REGEX "/demo/gen/(title|gameOptions)/")
     file(GLOB DEMO_TITLE_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/demo/gen/title/nes/*.cpp)
@@ -1598,39 +726,20 @@ FAMISTUDIO_CFG_SFX_STREAMS, so the two cannot disagree.")
     add_custom_command(
             OUTPUT ${PASS1_ELF}
             COMMAND ${CMAKE_CXX_COMPILER}
-            # This hand-rolled invocation bypasses CMAKE_CXX_STANDARD and the
-            # demo target's options, so the standard and the #embed extension
-            # silencer must be set explicitly to match the demo target. -x c++
-            # forces the C++ frontend for the source inputs.
             -std=gnu++23 -Wno-c23-extensions -x c++
             -include ${CMAKE_SOURCE_DIR}/demo/src/graphics/charmaps.hpp
             -Os ${PLATFORM_DEFINE_FLAGS} ${DEMO_PLACEMENT_FLAGS} ${FAMISTUDIO_CFG_FLAGS} -DGEN_TARGET_DIR=nes -D${ORIENTATION}
-            # mos-nes.cfg defaults to -mlto-zp=224 (the whole region), letting
-            # mos-zero-page-alloc opportunistically promote ordinary globals into
-            # zero page with no source-level opt-in. Capped to 0 so zero page is
-            # only ever used by what explicitly asks for it: `direct`-tagged C++
-            # globals (.zp.bss, technology.hpp) and FamiStudio's own ZEROPAGE
-            # segment (famistudio_config.s), neither of which this flag affects.
             -mlto-zp=0
-            # This custom command calls the compiler directly, bypassing
-            # CMAKE_EXE_LINKER_FLAGS (which supplies -T/-L for every ordinary
-            # CMake target's link step) -- so -T/-L have to be repeated here too.
             -T ${TOPLEVEL_LD}
             -L${CMAKE_SOURCE_DIR}/src/nes/mappers
             -I${CMAKE_SOURCE_DIR}/include
             -I${CMAKE_SOURCE_DIR}/include/umbrella
             -I${CMAKE_BINARY_DIR}/famistudio_include
-            # Same reason as the -D flags above: this invocation inherits none
-            # of the demo target's include directories, so the generated
-            # effect-name enum has to be found here too or any demo source
-            # that includes <sfx.hpp> breaks this diagnostic build alone.
             -I${CMAKE_BINARY_DIR}/gen
             -I${intsh_SOURCE_DIR}
             -I${tuple_SOURCE_DIR}
             -I${consh_SOURCE_DIR}
             ${DEMO_C_SOURCES}
-            # Stop forcing the C++ frontend before the archive/object inputs
-            # so the driver treats them as link inputs, not source files.
             -x none
             $<TARGET_FILE:pnes>
             ${FAMISTUDIO_OBJ}
@@ -1640,30 +749,11 @@ FAMISTUDIO_CFG_SFX_STREAMS, so the two cannot disagree.")
             ${FAMISTUDIO_OBJ}
             ${DEMO_ASM_OBJECTS}
             ${DEMO_C_SOURCES}
-            # The generated effect-name enum, for the same reason its -I is
-            # above: this invocation is outside the demo target, so the
-            # add_dependencies() that orders it for everyone else does not
-            # cover it.
             ${NES_SFX_LIST_HPP}
             COMMENT "Linking diagnostic ELF for ZP/BSS measurement"
-            # DEMO_PLACEMENT_FLAGS' entries carry literal ()/" characters
-            # (CREATE_SEGMENT_KEYWORD("...")) -- without VERBATIM, CMake
-            # passes COMMAND arguments to the underlying generator (here,
-            # Ninja's /bin/sh -c) unescaped, so the shell chokes on the bare
-            # parens. VERBATIM asks CMake to do the platform-correct
-            # escaping instead; every earlier argument here (plain paths/
-            # flags, no shell metacharacters) is unaffected by turning it on.
             VERBATIM
     )
 
-    # ------------------------------------------------------------------
-    # Diagnostic only: report how much ZP/BSS the C++ side actually uses.
-    # Informational -- measure_sections.cmake's own header comment explains
-    # why this can never feed back into a real padding step (llvm-mos's own
-    # linker script already places ca65's ZEROPAGE/BSS after the C-side
-    # sections via wildcard order; adding real padding here would double-
-    # count the reservation). Nothing depends on this file's contents.
-    # ------------------------------------------------------------------
 
     set(CA65_PADDING ${CMAKE_BINARY_DIR}/ca65_padding.s)
     add_custom_command(
@@ -1678,13 +768,7 @@ FAMISTUDIO_CFG_SFX_STREAMS, so the two cannot disagree.")
             COMMENT "Extracting ZP/BSS sizes (diagnostic only)"
     )
 
-    # ------------------------------------------------------------------
-    # Final link
-    # ------------------------------------------------------------------
 
-    # chr_rom.cpp #embeds the packed blob (demo/chr/chr.bin) and emits it as the
-    # cartridge's CHR ROM image. The blob is a blobman output, not a source file,
-    # so declare it explicitly: repacking it must retrigger that compile.
     set_source_files_properties(${CMAKE_SOURCE_DIR}/demo/src/graphics/chr_rom.cpp
             PROPERTIES OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/demo/chr/chr.bin")
 
@@ -1693,51 +777,21 @@ FAMISTUDIO_CFG_SFX_STREAMS, so the two cannot disagree.")
 
     target_link_libraries(demo PRIVATE pnes)
 
-    # So demo sources can `#include <sfx.hpp>` for the generated effect-name
-    # enum. It lives in the BINARY dir, not demo/gen: that directory is uitk's
-    # output and is rewritten at configure time, whereas this is a per-build-dir
-    # artifact of the SFX export, which is itself region-dependent (see
-    # NES_SFX_ASM above). add_dependencies(demo demo_famistudio_asm) further
-    # down is what guarantees it exists before any demo source compiles.
     target_include_directories(demo PRIVATE ${CMAKE_BINARY_DIR}/gen)
 
-    # Bareword (unquoted) macro naming this target's own demo/gen/*/<dir>
-    # subdirectory -- consumed via ::STRCAT (pnes/technology.hpp) for
-    # a computed #include, e.g. `#include STRCAT(../../gen/title/GEN_TARGET_DIR/title.hpp)`,
-    # not a search-path trick. Value always matches DEMO_TITLE_DIR (hardcoded
-    # "nes" here, same as the glob above, since this branch never sets that
-    # variable).
     target_compile_definitions(demo PRIVATE GEN_TARGET_DIR=nes)
 
-    # TITLE/TITLE_DATA/SYSMEM as real, whole-macro compile definitions (not
-    # just the section-name strings AUDIO/UI_SECTION feed into a locally
-    # #define'd macro) -- so they reach every demo .cpp/generated header
-    # without depending on banks.hpp having been #included first in the
-    # right order. Same list PASS1_ELF's raw compiler invocation above was
-    # given as -D flags, kept as one DEMO_PLACEMENT_DEFINES source of truth.
     target_compile_definitions(demo PRIVATE ${DEMO_PLACEMENT_DEFINES})
 
-    # CHR art is pulled in with #embed (C23), which Clang flags as an extension
-    # in C++ mode. It is the intended mechanism here, so silence the diagnostic.
     target_compile_options(demo PRIVATE -Wno-c23-extensions)
 
     add_dependencies(demo demo_famistudio_asm)
 
-    # CA65_PADDING is listed here purely so the diagnostic ZP/BSS measurement
-    # (informational only -- see its own comment above) actually runs as
-    # part of a normal build; nothing downstream reads its output.
     add_custom_target(demo_famistudio_asm
             DEPENDS ${FAMISTUDIO_OBJ} ${DEMO_ASM_OBJECTS} ${CA65_PADDING}
                     ${NES_SFX_LIST_HPP}
     )
 
-    # ------------------------------------------------------------------
-    # Post-link diagnostic: how full each memory region ended up. Purely
-    # informational (see tools/report_space.cmake's own header) -- a region
-    # that actually overflows is a hard linker error well before this runs,
-    # so this exists to show how much room is LEFT, especially in banks that
-    # hold nothing yet and therefore emit no section at all.
-    # ------------------------------------------------------------------
     add_custom_command(TARGET demo POST_BUILD
             COMMAND ${CMAKE_COMMAND}
             -DREADELF=${LLVM_READELF}
@@ -1747,16 +801,6 @@ FAMISTUDIO_CFG_SFX_STREAMS, so the two cannot disagree.")
             VERBATIM
     )
 
-    # ------------------------------------------------------------------
-    # logdata.lua generation. See include/pnes/logger.hpp and
-    # tools/luaLogBuilder/main.cpp's own header comments for the whole
-    # design -- this just runs the already-built host tool (see
-    # lua_log_builder_tool, above) against the ELF this link just produced,
-    # writing logdata.lua next to demo.nes itself (where tools/pnes.lua
-    # expects to find it -- it resolves the path from the running ROM's own
-    # location, not a fixed one). add_dependencies() ensures the tool exists
-    # before this runs even on a from-clean build.
-    # ------------------------------------------------------------------
     add_dependencies(demo lua_log_builder_tool)
     add_custom_command(TARGET demo POST_BUILD
             COMMAND ${LUA_LOG_BUILDER_BIN}
@@ -1765,27 +809,6 @@ FAMISTUDIO_CFG_SFX_STREAMS, so the two cannot disagree.")
             VERBATIM
     )
 
-    # ------------------------------------------------------------------
-    # .mlb fixup, so Mesen can name symbols in the profiler / debugger /
-    # trace logger instead of showing bare PRG addresses.
-    #
-    # The llvm-mos SDK emits demo.mlb itself, with `G:` code addresses as raw
-    # ELF VMAs -- $e000 for fixed-bank code, and the bank-encoded pseudo-VMAs
-    # ($18000, $5826c, $8a400) for banked domains. Mesen wants PRG FILE
-    # OFFSETS, which is what its profiler reports as `PRG: $xxxxx`, so the
-    # SDK's file names nothing. This rewrites them in place.
-    #
-    # The script re-derives each offset from demo/link.ld's documented
-    # (bank + 1) << 16 encoding and then BYTE-VERIFIES every one against the
-    # linked ROM, failing the build on a mismatch. That matters because
-    # link.ld's own comment warns the ORIGIN encoding and the FULL() order are
-    # "kept in agreement by hand" -- so this step doubles as a check that they
-    # still are. Runs after the link, so it sees the .nes this build produced.
-    # ------------------------------------------------------------------
-    # OPTIONAL, deliberately: nothing else in this build needs Python (the
-    # Tiled exporters under demo/tiled are run by hand), so a missing
-    # interpreter must not break a ROM build. Without it you just get the
-    # SDK's unusable .mlb and have to resolve captures by hand.
     find_program(PNES_PYTHON3 NAMES python3 python)
     if(PNES_PYTHON3)
         add_custom_command(TARGET demo POST_BUILD
@@ -1799,27 +822,12 @@ FAMISTUDIO_CFG_SFX_STREAMS, so the two cannot disagree.")
                        "names (tools/fix_mlb.py can be run by hand later)")
     endif()
 
-    # FamiStudio and the hand-written assembly objects are required by
-    # every build configuration.
     target_link_options(demo PRIVATE
             -mlto-zp=0   # match pass-1 cap; disables mos-zero-page-alloc entirely, see pass-1's comment
             ${FAMISTUDIO_OBJ}
             ${DEMO_ASM_OBJECTS}
     )
 
-    # ----------------------------------------------------------------------
-    # GameCube + Wii target (libogc / GX), via the devkitPPC toolchain.
-    #
-    # One backend (src/ogc) serves both consoles -- they share the Gekko/Broadway
-    # CPU and the Flipper/Hollywood GX pipeline; only input and a couple of build
-    # flags differ. The Wii .dol additionally runs unmodified on Wii U via vWii,
-    # so this single branch covers all three with the bar set at a Homebrew app.
-    #
-    # The toolchain file (GameCube.cmake / Wii.cmake) is supplied via the
-    # gc-release / wii-release presets; it sets CMAKE_SYSTEM_NAME and, through
-    # Platform/libogc.cmake, the arch flags, the -logc -lm link line (plus
-    # -lwiiuse -lbte on Wii) and the ogc_create_dol() helper used below.
-    # ----------------------------------------------------------------------
 elseif(TARGET_PLATFORM STREQUAL "gc" OR TARGET_PLATFORM STREQUAL "gc_ntscj" OR TARGET_PLATFORM STREQUAL "wii")
     project(pnes CXX)
 
@@ -1827,39 +835,10 @@ elseif(TARGET_PLATFORM STREQUAL "gc" OR TARGET_PLATFORM STREQUAL "gc_ntscj" OR T
     _make_consh_available()
     _fixup_fetched_cxx_std_targets()
 
-    # gc_ntscj builds exactly the "gc" branch below (same PLATFORM_DEFINE/
-    # DEMO_TITLE_DIR -- there is no separate TARGET_GC_NTSCJ define), and REGION
-    # is the entire difference. That is why it is a TARGET_PLATFORM of its own
-    # rather than a flag: which market a build is for is a property of the
-    # target being built.
-    #
-    # IT IS ALSO THE ONLY GAMECUBE MARKET VARIANT, because Japan is the only one
-    # a build has to know about. A Japanese console formats memory cards as
-    # Shift-JIS and renders them with the SJIS IPL font; US and European
-    # consoles are both ANSI with the same font, so a save file written on one
-    # is correct on the other. Everything else that differs between a US and a
-    # European GameCube is READABLE AT RUN TIME and so is not a build axis:
-    #   - the refresh, from src/ogc/video.cpp's DetectRefresh (a European
-    #     console prefers 50Hz 576i, or 60Hz if it is set to EURGB60);
-    #   - the player's language, from SYS_GetLanguage() -- which on a PAL
-    #     console is one of six (SYS_LANG_ENGLISH..SYS_LANG_DUTCH, libogc's
-    #     ogc/system.h) and so could not be carried by a single "EU" string
-    #     anyway.
-    # There is no clock difference at all: every GameCube runs the same 485MHz
-    # Gekko in every region, unlike the NES where PAL is a different part.
-    #
-    # gc_pal USED TO LIVE HERE, setting the former FRAMERATE axis to 1 so
-    # irq::init() would keep a
-    # 50Hz preferred mode instead of overriding it to NTSC 60Hz. That override
-    # is gone (see that function), so the two configurations would now be
-    # identical apart from REGION="EU", which buys nothing per the above.
     if(TARGET_PLATFORM STREQUAL "gc_ntscj")
         set(REGION "JP")
     endif()
 
-    # Negated rather than listing the GameCube variants: this branch's elseif
-    # admits exactly gc, gc_ntscj and wii, so "not wii" is the complete
-    # GameCube set and stays complete when another market variant is added.
     if(NOT TARGET_PLATFORM STREQUAL "wii")
         set(PLATFORM_DEFINE TARGET_GC)
         set(DEMO_TITLE_DIR gcn)
@@ -1868,67 +847,15 @@ elseif(TARGET_PLATFORM STREQUAL "gc" OR TARGET_PLATFORM STREQUAL "gc_ntscj" OR T
         set(DEMO_TITLE_DIR wii)
     endif()
 
-    # Alternative nametable wiring (see the TARGET_NES branch's own comment,
-    # above): a fact about which board a build is modeling, not something
-    # exclusive to the NES target itself, so this desktop/console preview
-    # needs the same define to route mmc3.cpp's strong ppu::ReadNametable/
-    # WriteNametable overrides correctly off-NES too.
     if(DEFINED ALTERNATIVE_NAMETABLE)
         list(APPEND PLATFORM_DEFINE "ALTERNATIVE_NAMETABLE=${ALTERNATIVE_NAMETABLE}")
     endif()
 
-    # GAMECUBE ONLY, hence the guard: the Wii in this same branch has no EXI
-    # memory card slot, so none of the knobs below describe anything it can do
-    # and the generated layout would never be included. Generating it anyway
-    # would put a save-layout line in the configure output of a build whose
-    # saves do not have a directory entry or an icon.
-    #
-    # THE WII HAS ITS OWN PAIR OF KNOBS IN THE else() BELOW. It saves to a FAT
-    # volume (src/ogc/save.cpp's Wii half), so what a project has to name is a
-    # directory and a file name rather than a gamecode and a company -- the one
-    # thing both consoles' knobs have in common is that they are set once and
-    # then cannot move without orphaning every save already written.
     if(NOT TARGET_PLATFORM STREQUAL "wii")
-        # ------------------------------------------------------------------
-        # Memory-card save identity, and the layout of the save's own metadata.
-        #
-        # THE SPLIT HERE IS PHYSICAL, NOT STYLISTIC. A GameCube save has two
-        # halves that live in different places on the card:
-        #
-        #   - The DIRECTORY ENTRY: 64 bytes in one of the card's two directory
-        #     blocks, holding the gamecode, company code, file name, the format
-        #     fields and the OFFSETS of everything else. It costs a save file no
-        #     space at all, and it is where identity lives.
-        #   - The FILE CONTENTS: the comment text the system menu displays, the
-        #     banner and the icon pixels. These are inside the save file, reached
-        #     through the directory entry's `comment_addr` / `icon_addr`. They are
-        #     the APPLICATION'S -- declared as members of its own save struct, so
-        #     that the struct is the file and this library reserves nothing.
-        #
-        # So the three knobs below are the first half: values that must never
-        # change for the life of a game, that no asset determines, and that take
-        # none of the file's 8192 bytes. They are cache STRINGs for the same reason
-        # WIIU_TITLE_ID and friends are -- a project overrides them once in its own
-        # build, and `cmake -LH` lists them. The second half -- the comment text
-        # and the pixels -- is not described anywhere in this build: it is
-        # declared and filled by the application's own save struct.
-        #
-        # OGC_GAME_CODE / OGC_COMPANY_CODE ARE THE ONES THAT CANNOT MOVE LATER.
-        # src/ogc/save.cpp searches with CARD_FindFirst(chn, &dir, false), whose
-        # filter is exactly this pair -- so a build that changes either one stops
-        # finding every save written by every earlier build. Not corrupting them:
-        # the data is still on the card and still visible in the system menu, and
-        # the game simply reports that there is no save. That failure looks like a
-        # bug in the card, which is why it is worth saying here and not only in the
-        # backend.
-        # ------------------------------------------------------------------
         set(OGC_GAME_CODE    "PNES"               CACHE STRING "GameCube save gamecode (exactly 4 ASCII)")
         set(OGC_COMPANY_CODE "BR"                 CACHE STRING "GameCube save company code (exactly 2 ASCII)")
         set(OGC_FILENAME     "super_mary_sisters" CACHE STRING "GameCube save file name (at most 31 ASCII)")
 
-        # Checked here as well as by save.cpp's own static_asserts: a wrong length
-        # set in local.cmake should name itself at configure time rather than as a
-        # template-ish error in a backend the setter may never have opened.
         string(LENGTH "${OGC_GAME_CODE}"    _ogc_gamecode_len)
         string(LENGTH "${OGC_COMPANY_CODE}" _ogc_company_len)
         string(LENGTH "${OGC_FILENAME}"     _ogc_filename_len)
@@ -1945,33 +872,9 @@ elseif(TARGET_PLATFORM STREQUAL "gc" OR TARGET_PLATFORM STREQUAL "gc_ntscj" OR T
         endif()
 
     else()
-        # ------------------------------------------------------------------
-        # Where a Wii save lives on the SD card or the USB disk.
-        #
-        # TWO NAMES AND NOT A PATH, because src/ogc/save.cpp assembles
-        # "sd:/<dir>/<file>" and "usb:/<dir>/<file>" from them itself and
-        # static_asserts that neither contains a separator -- a WII_SAVE_DIR
-        # with a slash in it would silently point the save somewhere else,
-        # possibly into another game's directory.
-        #
-        # WII_SAVE_DIR IS THE ONE THAT CANNOT MOVE LATER, for the same kind of
-        # reason OGC_GAME_CODE cannot: the Wii backend's search is PATH-based
-        # (a FAT volume has no equivalent of CARD_FindFirst's gamecode filter),
-        # so a build that renames either knob stops finding every save written
-        # by every earlier build. The data is still on the card and the game
-        # simply reports that there is no save -- which looks like a bug in the
-        # card, so it is worth saying here and not only in the backend.
-        #
-        # A DIRECTORY RATHER THAN THE VOLUME ROOT is not negotiable in the
-        # backend either: an SD card's root belongs to the player and to the
-        # Homebrew Channel.
-        # ------------------------------------------------------------------
         set(WII_SAVE_DIR      "super_mary_sisters" CACHE STRING "Wii save directory under the SD/USB volume root")
         set(WII_SAVE_FILENAME "save.dat"           CACHE STRING "Wii save file name inside WII_SAVE_DIR")
 
-        # Checked here as well as by save.cpp's own static_asserts, so that a
-        # bad value set in local.cmake names itself at configure time rather
-        # than as a static_assert in a backend the setter may never have opened.
         foreach(_wii_knob WII_SAVE_DIR WII_SAVE_FILENAME)
             string(LENGTH "${${_wii_knob}}" _wii_knob_len)
             if(_wii_knob_len EQUAL 0 OR _wii_knob_len GREATER 255)
@@ -1987,10 +890,6 @@ elseif(TARGET_PLATFORM STREQUAL "gc" OR TARGET_PLATFORM STREQUAL "gc_ntscj" OR T
         endforeach()
     endif()
 
-    # The OGC backend presents the shared software PPU (src/emu) through GX: the
-    # emulator and all the nametable/OAM/palette write functions are
-    # platform-agnostic and compiled here alongside the GX-specific
-    # video/present, the PAD/WPAD input, and the ASND audio.
     file(GLOB OGC_SOURCES CONFIGURE_DEPENDS src/ogc/*.cpp src/emu/*.cpp src/emu/mappers/*.cpp)
     file(GLOB_RECURSE ALL_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/all/*.cpp)
     add_library(pnes STATIC ${OGC_SOURCES} ${ALL_SOURCES})
@@ -1998,78 +897,27 @@ elseif(TARGET_PLATFORM STREQUAL "gc" OR TARGET_PLATFORM STREQUAL "gc_ntscj" OR T
             ${CMAKE_SOURCE_DIR}/include
             ${CMAKE_SOURCE_DIR}/include/umbrella
     )
-    # TARGET_OGC is the shared "GameCube-or-Wii" group the engine headers gate on
-    # (emulated PPU like SDL, but a fixed viewport and no SDL headers); TARGET_GC
-    # / TARGET_WII select the console-specific bits (e.g. WPAD on Wii only).
     target_compile_definitions(pnes PUBLIC ${PLATFORM_DEFINE} TARGET_OGC)
 
     if(NOT TARGET_PLATFORM STREQUAL "wii")
-        # The save identity, as string definitions rather than a generated header,
-        # because these are three scalars a project sets once -- and because
-        # src/ogc/save.cpp static_asserts their lengths, which only works if they
-        # arrive as string literals it can take sizeof of.
-        #
-        # PRIVATE, not PUBLIC: these are the backend's business and nothing a
-        # game includes reads them. The save's own LAYOUT is not here in any
-        # form -- it belongs to the application's save struct, and this backend
-        # reserves and places nothing.
         target_compile_definitions(pnes PRIVATE
                 "OGC_GAME_CODE=\"${OGC_GAME_CODE}\""
                 "OGC_COMPANY_CODE=\"${OGC_COMPANY_CODE}\""
                 "OGC_FILENAME=\"${OGC_FILENAME}\"")
 
     else()
-        # PRIVATE for the reason the GameCube's three are: the save's location
-        # is the backend's business, and nothing a game includes reads it. A
-        # game that wants to show a player where its save went asks
-        # ::save::GetDeviceStatus, which answers with the complete path.
         target_compile_definitions(pnes PRIVATE
                 "WII_SAVE_DIR=\"${WII_SAVE_DIR}\""
                 "WII_SAVE_FILENAME=\"${WII_SAVE_FILENAME}\"")
     endif()
 
-    # The on-target statistical PC sampler + on-screen overlay (src/ogc/
-    # profiler.cpp and the overlay path in video.cpp) is a development tool, not
-    # a shipping feature: it spins up a high-priority sampler thread and draws a
-    # hex/bar overlay every frame. Compile it only into Debug builds via the
-    # OGC_PROFILER gate, so Release .dols carry neither the thread nor the draw.
-    # PRIVATE: only the library's own TUs (profiler.cpp/video.cpp) consult it.
     target_compile_definitions(pnes PRIVATE $<$<CONFIG:Debug>:OGC_PROFILER>)
-    # asnd: libogc's ASND audio library (src/ogc/audio.cpp), not pulled in by
-    # OGC_STANDARD_LIBRARIES (-logc -lm) on its own.
-    #
-    # NO libfat ON THE GAMECUBE: the only thing that ever wanted it there was
-    # the SD-card route for sound effects, which is disabled (see the sfx block
-    # below and .ignore/ogc-sfx-sd-gecko/NOTES.md). Re-add `fat` to this line
-    # when re-enabling that code -- it is what brings the SD/USB drivers libogc
-    # exposes as __io_gcsda/__io_gcsdb/__io_gcsd2 (SD Gecko, SD2SP2), and it
-    # costs ~155KB of .dol that an embedded build has no reason to carry.
     target_link_libraries(pnes PUBLIC br0::intsh br0::tuple br0::consh asnd)
 
-    # THE WII DOES LINK IT, because that is where its saves are: the Wii half of
-    # src/ogc/save.cpp mounts the front SD slot and USB mass storage through
-    # libfat (fatMountSimple) over the drivers libogc exposes as __io_wiisd and
-    # __io_usbstorage.
-    #
-    # A GAME THAT NEVER SAVES STILL DOES NOT PAY FOR IT. pnes is a static
-    # library, so save.o is pulled into a link only when something references
-    # ::save:: -- and libfat only when save.o is. The ~155KB lands in the .dol
-    # of a game that saves and in no other, which is why this is an
-    # unconditional link rather than an option: the opt-out already exists and
-    # is "do not call the save API".
     if(TARGET_PLATFORM STREQUAL "wii")
         target_link_libraries(pnes PUBLIC fat)
     endif()
 
-    # The music is EMBEDDED in the .dol, not loaded from disk: a Homebrew
-    # Channel/loader .dol has no guaranteed content path the way a packaged
-    # Wii U title does, so this mirrors the Wii U backend's approach exactly
-    # (src/wiiu's own comment, above) -- encode the desktop WAV to a small
-    # Vorbis OGG and #embed it (src/ogc/audio.cpp decodes it with stb_vorbis
-    # at runtime, streaming into ASND voice buffers since libogc has no SDL
-    # audio device to hand a callback to). Unlike the Wii U path this does NOT
-    # force 48kHz: ASND_SetVoice() takes the source rate directly and mixes
-    # at whatever rate it's given, so the OGG stays at the WAV's native 44.1kHz.
     find_program(FFMPEG ffmpeg REQUIRED)
     FetchContent_Declare(
             stb
@@ -2093,14 +941,6 @@ elseif(TARGET_PLATFORM STREQUAL "gc" OR TARGET_PLATFORM STREQUAL "gc_ntscj" OR T
             VERBATIM)
     add_custom_target(ogc-assets DEPENDS ${OGC_OGG})
     add_dependencies(pnes ogc-assets)
-    # audio.cpp resolves `#embed <pc_audio.ogg>` via --embed-dir (the canonical
-    # GCC mechanism; -I is not reliably searched for #embed). Scope both the
-    # search dir and the rebuild-on-change dependency to that one source.
-    # OBJECT_DEPENDS lists the SFX raw files and the generated include too: all
-    # of them are #embedded into this one TU, so changing any of them has to
-    # retrigger its compile. The include path is the same directory the music's
-    # --embed-dir already points at, which is why the raw files are written
-    # under it rather than into an assets/ folder of their own.
     set_source_files_properties(${CMAKE_SOURCE_DIR}/src/ogc/audio.cpp
             PROPERTIES
                 OBJECT_DEPENDS  "${OGC_OGG};${OGC_SFX_OUTPUTS};${OGC_SFX_INC}"
@@ -2114,9 +954,6 @@ elseif(TARGET_PLATFORM STREQUAL "gc" OR TARGET_PLATFORM STREQUAL "gc_ntscj" OR T
     file(GLOB DEMO_GAMEOPTIONS_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/demo/gen/gameOptions/${DEMO_TITLE_DIR}/*.cpp")
     list(APPEND DEMO_SOURCES ${DEMO_GAMEOPTIONS_SOURCES})
 
-    # chr_rom.cpp #embeds the packed blob (demo/chr/chr.bin) and emits it as the
-    # cartridge's CHR ROM image. The blob is a blobman output, not a source file,
-    # so declare it explicitly: repacking it must retrigger that compile.
     set_source_files_properties(${CMAKE_SOURCE_DIR}/demo/src/graphics/chr_rom.cpp
             PROPERTIES OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/demo/chr/chr.bin")
 
@@ -2124,55 +961,9 @@ elseif(TARGET_PLATFORM STREQUAL "gc" OR TARGET_PLATFORM STREQUAL "gc_ntscj" OR T
     set_target_properties(demo PROPERTIES SUFFIX ".elf")
     target_link_libraries(demo PRIVATE pnes)
 
-    # ------------------------------------------------------------------
-    # Sound effects -> EMBEDDED in the .dol, like the music above.
-    #
-    # THE FOLDER ROUTE IS DISABLED, NOT DELETED: the backend can also load
-    # these from an assets/ folder on an SD Gecko / SD2SP2 card, and that code
-    # is still in src/ogc/audio.cpp behind an `#if 0`. It is off because
-    # DOLPHIN CANNOT EMULATE EITHER DEVICE -- its GameCube EXI slots offer no
-    # SD card of any kind (the "Gecko" in its slot list is the USB Gecko, a
-    # serial debug cable), so a GameCube build could never make a sound in the
-    # emulator, which is where this gets tested. The full write-up, including
-    # what to do when returning to it, is in
-    # .ignore/ogc-sfx-sd-gecko/NOTES.md.
-    #
-    # WHICH IS WHY THE APP-DEFINED-TABLE PROBLEM IS SOLVED IN CMAKE: #embed
-    # needs a literal path at the backend's compile time and the effect table
-    # belongs to the application (audio::SetSfx), so the list cannot be written
-    # into the backend by hand. It is GENERATED here instead, from this
-    # project's own effect directory, as one #embed per file plus a name table;
-    # audio.cpp matches an entry to ::sfxs by filename. The names are the join,
-    # not the order, so a glob reordering cannot silently mismatch effects.
-    #
-    # RAW PCM, NOT OGG, because ASND voice formats ARE raw PCM: 48kHz stereo
-    # s16 is played straight out of .rodata, with no decoder, no decode time
-    # and no second copy in RAM -- the embedded bytes ARE the voice buffer. The
-    # music is an OGG only because 47MB of PCM fits neither in a .dol nor in
-    # 24MB of GameCube RAM; a 0.4s effect has no such problem.
-    #
-    # s16BE, NOT s16LE. VOICE_STEREO_16BIT is big-endian (asndlib.h #defines it
-    # to the same value as VOICE_STEREO_16BIT_BE), so this is the console's own
-    # byte order and the format the music voice is already fed. The Switch
-    # branch's equivalent step writes s16le because ARM is little-endian; the
-    # pair of (encode order, voice format) has to agree per platform, and
-    # disagreeing is audible static rather than silence.
-    #
-    # THE SILENCE TRIM IS A SIZE FIX, not a creative one: every effect in
-    # demo/audio/sfx is ~0.35s of sound followed by ~2.3s of digital silence
-    # (measured with ffmpeg silencedetect: Toggle.ogg's sound ends at 0.349s and
-    # reads -91dB -- the dither floor -- from 1.0s on). Padding costs 48000*4
-    # bytes a second, and it is now .dol SIZE rather than card space: trimmed,
-    # all five effects are ~318KB instead of ~2.5MB. ASND stops a voice at the
-    # end of its buffer, so a trimmed effect and a padded one sound identical.
-    # areverse ... areverse is what makes silenceremove, which only trims
-    # leading silence, trim the TRAILING silence; 50ms is kept so nothing clips
-    # the tail of the sound itself. The SOURCE OGGs ARE NOT TOUCHED -- this
-    # writes only into the build tree.
     set(OGC_SFX_DIR ${CMAKE_SOURCE_DIR}/demo/audio/sfx CACHE PATH
             "Directory of the project's one-shot sound effects (*.ogg). Each is \
 transcoded to raw PCM and #embedded into the GC/Wii .dol.")
-    # Beside the music's own embed input, so ONE --embed-dir serves both.
     set(OGC_SFX_OUT_DIR ${OGC_ASSET_DIR}/sfx)
     set(OGC_SFX_INC ${OGC_ASSET_DIR}/sfx_embed.inc)
     set(OGC_SFX_TRIM "areverse,silenceremove=start_periods=1:start_threshold=-60dB:start_silence=0.05:detection=peak,areverse")
@@ -2195,10 +986,6 @@ transcoded to raw PCM and #embedded into the GC/Wii .dol.")
                 COMMENT "Encoding GC/Wii SFX: ${OGC_SFX_NAME}.ogg -> embedded sfx/${OGC_SFX_NAME}.raw (48k s16be)"
                 VERBATIM)
         list(APPEND OGC_SFX_OUTPUTS ${OGC_SFX_RAW})
-        # alignas(32): ASND_SetVoice's buffer must be 32-byte aligned
-        # (asndlib.h), and these arrays ARE the buffers -- nothing copies them
-        # into an aligned allocation first, which is the whole point of
-        # embedding raw PCM rather than an encoded form.
         string(APPEND OGC_SFX_INC_BODY
                 "alignas(32) static const unsigned char sfx_blob_${OGC_SFX_INDEX}[] = {\n"
                 "#embed <sfx/${OGC_SFX_NAME}.raw>\n"
@@ -2208,66 +995,22 @@ transcoded to raw PCM and #embedded into the GC/Wii .dol.")
         math(EXPR OGC_SFX_INDEX "${OGC_SFX_INDEX} + 1")
     endforeach()
     string(APPEND OGC_SFX_INC_BODY "\nstatic const sfx_embed_t sfx_embeds[] = {\n${OGC_SFX_INC_TABLE}};\n")
-    # file(CONFIGURE) and not file(WRITE): it leaves the file alone when the
-    # content is unchanged, so a reconfigure does not retrigger the compile of
-    # audio.cpp for nothing.
     file(CONFIGURE OUTPUT ${OGC_SFX_INC} CONTENT "${OGC_SFX_INC_BODY}" @ONLY)
 
-    # On `pnes`, not on `demo`: the LIBRARY's own compile #embeds these now, so
-    # they have to exist before audio.cpp is compiled -- the same relationship
-    # the music OGG already has, and the opposite of the folder route's, where
-    # they were the application's loose assets.
     add_custom_target(ogc-sfx-assets DEPENDS ${OGC_SFX_OUTPUTS})
     add_dependencies(pnes ogc-sfx-assets)
 
-    # ----------------------------------------------------------------------
-    # Memory-card BANNER + ICON -> CI8, EMBEDDED in the save struct.
+    # Memory-card banner and icon, GameCube only -- the Wii in this branch has
+    # no card to put one on.
     #
-    # GAMECUBE ONLY, like the save identity block above and for the same
-    # reason: these are the pictures the GameCube system menu draws beside a
-    # save file, and the Wii in this same branch has no memory card to put one
-    # on. demo/src/modes/pregame.cpp declares both arrays inside `#ifdef
-    # TARGET_GC`, so on Wii there is nothing to fill.
+    # What the system menu reads is a GX texture rather than a PNG: CI8 pixels
+    # in 8x4 tiles followed by a 256-entry big-endian RGB5A3 palette, which is
+    # what tools/ogc_card_image.py exists for. The sizes are fixed by hardware
+    # and match what save.hpp declares, so a mismatch is a compile error at the
+    # #embed rather than a corrupt save.
     #
-    # WHAT THE MENU READS IS A GX TEXTURE, NOT A PNG -- CI8 pixels in 8x4
-    # tiles, followed by a 256-entry big-endian RGB5A3 palette. Those two
-    # facts are what tools/ogc_card_image.py exists for; its header says more.
-    # The sizes are fixed by the hardware and are exactly the sizes
-    # OGC_BANNER_CI / OGC_ICON_CI declare in include/pnes/save.hpp:
-    #
-    #   banner  96x32  ->  3072 pixels + 512 palette = 3584
-    #   icon    32x32  ->  1024 pixels + 512 palette = 1536
-    #
-    # so a mismatch is a compile error at the #embed, not a corrupt save.
-    #
-    # ONE ICON FRAME, DELIBERATELY. A CI icon may carry up to CARD_MAXICONS
-    # frames sharing one palette, and this generates exactly one: the icon is
-    # STATIC. Two consequences for whatever fills the directory entry
-    # (save::SetMetaData, ogc/card.h):
-    #
-    #   - frame 0's speed must still be NONZERO -- libogc forces a frame's
-    #     format to 0 when its speed is 0, so a "static" icon declared at
-    #     speed 0 renders as nothing at all (src/ogc/save.cpp::SetMetaData
-    #     spells this trap out). Frame 1 is CARD_SPEED_END.
-    #   - THE BOUNCE BIT STAYS CLEAR. banner_fmt is CARD_BANNER_CI (0x01) and
-    #     nothing more: bit 2 of that byte is the icon's ping-pong/bounce
-    #     animation flag, which is meaningless for one frame and is NOT set
-    #     here. icon_fmt frame 0 is CARD_ICON_CI.
-    #
-    # THE CONVERSION IS TWO TOOLS BECAUSE EACH DOES WHAT IT IS GOOD AT:
-    # ImageMagick decodes the PNG, forces the exact dimensions and caps the
-    # image at 256 colours (the Wii U branch below already depends on it for
-    # the same kind of job); the Python step does the console-specific part --
-    # RGB5A3 encoding, the tile walk and the palette -- with no third-party
-    # module, so the only new build dependency is an interpreter. Neither is
-    # optional here, unlike the .mlb fixup in the NES branch: without the blobs
-    # pregame.cpp has nothing to #embed and the build fails later and less
-    # clearly, so say so at configure time.
-    #
-    # Output lands in the BUILD tree, beside the music and SFX blobs and under
-    # the same --embed-dir, because it is derived data: demo/sys_assets/ogc
-    # holds the two PNGs a human edits and nothing a build wrote.
-    # ----------------------------------------------------------------------
+    # One icon frame, deliberately -- but frame 0's speed must still be nonzero,
+    # or libogc forces its format to 0 and a static icon renders as nothing.
     if(NOT TARGET_PLATFORM STREQUAL "wii")
         set(OGC_CARD_ART_DIR ${CMAKE_SOURCE_DIR}/demo/sys_assets/ogc CACHE PATH
                 "Directory holding the GameCube memory-card banner.png (96x32) and \
@@ -2292,9 +1035,6 @@ icon.png (32x32). Both are converted to CI8 and embedded in the save file.")
                     "(docker/Dockerfile.ogc does).")
         endif()
 
-        # banner is 96x32 and icon is 32x32; both are CARD_BANNER_W/H and
-        # CARD_ICON_W/H from ogc/card.h, restated here because this build is
-        # what has to resize to them.
         set(OGC_CARD_OUTPUTS)
         foreach(_card_art banner icon)
             if(_card_art STREQUAL "banner")
@@ -2309,15 +1049,8 @@ icon.png (32x32). Both are converted to CI8 and embedded in the save file.")
             set(_card_ci  ${OGC_CARD_OUT_DIR}/${_card_art}.ci)
             add_custom_command(
                     OUTPUT ${_card_ci}
-                    # The raw RGBA is a handoff between the two tools and
-                    # nothing consumes it afterwards; as a BYPRODUCT it is
-                    # cleaned with the blob rather than left in the build tree.
                     BYPRODUCTS ${_card_raw}
                     COMMAND ${CMAKE_COMMAND} -E make_directory ${OGC_CARD_OUT_DIR}
-                    # -resize WxH! is exact, aspect ratio and all: the formats
-                    # are fixed sizes, so art that is off by a few pixels should
-                    # ship slightly squashed rather than fail the build. Same
-                    # `!` the Wii U artwork below uses.
                     COMMAND ${IMAGEMAGICK_CONVERT} ${_card_src}
                             -alpha on -resize ${_card_w}x${_card_h}!
                             -colors 256 -depth 8 RGBA:${_card_raw}
@@ -2331,24 +1064,9 @@ icon.png (32x32). Both are converted to CI8 and embedded in the save file.")
             list(APPEND OGC_CARD_OUTPUTS ${_card_ci})
         endforeach()
 
-        # On `demo`, not on `pnes`: these are the APPLICATION's pixels, living
-        # in the application's own save struct. The library reserves no space
-        # for them and never sees them -- see the save-identity block's comment
-        # on which half of a save belongs to whom.
         add_custom_target(ogc-card-assets DEPENDS ${OGC_CARD_OUTPUTS})
         add_dependencies(demo ogc-card-assets)
 
-        # Same mechanism the music and SFX use on audio.cpp, scoped to the one
-        # TU that #embeds these: --embed-dir because -I is not reliably
-        # searched for #embed, and OBJECT_DEPENDS so re-exported art recompiles
-        # that TU instead of leaving last build's picture in the .dol.
-        #
-        # THE TU IS demo/src/save.cpp, not pregame.cpp. The banner and icon sit
-        # beside ::PopulateSaveData, which is the only thing that reads them --
-        # they were in the pregame mode while that mode was their only caller,
-        # which had a mode owning the bytes that describe the save rather than
-        # the save owning them. This property has to name whichever file holds
-        # the #embeds, so it moved with them.
         set_source_files_properties(${CMAKE_SOURCE_DIR}/demo/src/save.cpp
                 PROPERTIES
                     OBJECT_DEPENDS  "${OGC_CARD_OUTPUTS}"
@@ -2356,23 +1074,10 @@ icon.png (32x32). Both are converted to CI8 and embedded in the save file.")
                     COMPILE_OPTIONS "--embed-dir=${OGC_ASSET_DIR}")
     endif()
 
-    # See the TARGET_NES branch's own comment on this same call for
-    # GEN_TARGET_DIR. Quoted: DEMO_TITLE_DIR is "wii u" (a space) on the Wii
-    # branch below, and an unquoted argument here would split on that space
-    # into two separate (wrong) compile definitions.
     target_compile_definitions(demo PRIVATE "GEN_TARGET_DIR=${DEMO_TITLE_DIR}")
 
-    # CHR art is pulled in with #embed (C23). devkitPPC's GCC supports it without
-    # a diagnostic here; keep the Clang-only silencer guard for parity with the
-    # other branches (no-op under GCC).
     target_compile_options(demo PRIVATE $<$<CXX_COMPILER_ID:Clang>:-Wno-c23-extensions>)
 
-    # Enable LTO for release-type configs. The software PPU is the hot path and
-    # spans the pnes static lib (emu::GenerateFrame) and the demo (the
-    # per-frame IRQ handlers it calls back into); cross-module inlining matters
-    # here. CMake routes archiving through gcc-ar/gcc-ranlib once
-    # INTERPROCEDURAL_OPTIMIZATION is set, so the .dol-from-.elf step is
-    # unaffected. Mirrors the desktop branch below.
     include(CheckIPOSupported)
     check_ipo_supported(RESULT _ipo_ok OUTPUT _ipo_err)
     if(_ipo_ok)
@@ -2385,26 +1090,8 @@ icon.png (32x32). Both are converted to CI8 and embedded in the save file.")
         message(STATUS "IPO/LTO not supported by this toolchain: ${_ipo_err}")
     endif()
 
-    # Convert the linked ELF into a bootable .dol (Homebrew Channel / loader
-    # format). Defined by Platform/libogc.cmake once the OGC toolchain is active.
     ogc_create_dol(demo)
 
-    # ----------------------------------------------------------------------
-    # Nintendo 3DS target (libctru + citro2d), via the devkitARM toolchain.
-    #
-    # The 3DS presents the shared software PPU (src/emu) like the SDL backend:
-    # emu::GenerateFrame rasterises one ARGB frame on the ARM11, which is
-    # uploaded as a single RGBA8 texture and scaled to the top screen by
-    # citro2d. The PICA200 has no paletted-texture format, so the GX/CI4 tilemap
-    # path the GameCube/Wii branch uses cannot port -- a CPU raster into one
-    # texture is the natural fit.
-    #
-    # The toolchain file (3DS.cmake) is supplied via the ctr-* presets; it sets
-    # CMAKE_SYSTEM_NAME=Nintendo3DS and, through Platform/devkitArm.cmake, the
-    # arch flags and the ctr_generate_smdh() / ctr_create_3dsx() helpers used
-    # below. citro2d/citro3d/ctru are linked explicitly (the toolchain does not
-    # add them implicitly the way libogc.cmake adds -logc).
-    # ----------------------------------------------------------------------
 elseif(TARGET_PLATFORM STREQUAL "ctr")
     project(pnes CXX)
 
@@ -2414,10 +1101,6 @@ elseif(TARGET_PLATFORM STREQUAL "ctr")
 
     set(DEMO_TITLE_DIR 3ds)
 
-    # The 3DS backend presents the shared software PPU (src/emu) through citro2d:
-    # the emulator and all the nametable/OAM/palette write functions are
-    # platform-agnostic and compiled here alongside the citro2d video/present,
-    # the hid input, and the ndsp audio.
     file(GLOB CTR_SOURCES CONFIGURE_DEPENDS src/3ds/*.cpp src/emu/*.cpp src/emu/mappers/*.cpp)
     file(GLOB_RECURSE ALL_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/all/*.cpp)
     add_library(pnes STATIC ${CTR_SOURCES} ${ALL_SOURCES})
@@ -2425,52 +1108,15 @@ elseif(TARGET_PLATFORM STREQUAL "ctr")
             ${CMAKE_SOURCE_DIR}/include
             ${CMAKE_SOURCE_DIR}/include/umbrella
     )
-    # TARGET_CTR is the group the engine headers gate on (emulated PPU like SDL,
-    # but a fixed 32x30 viewport and no SDL headers -- same family as TARGET_OGC).
     target_compile_definitions(pnes PUBLIC TARGET_CTR)
-    # Alternative nametable wiring (see the TARGET_NES branch's own comment,
-    # near the top of this file): a fact about which board a build is
-    # modeling, not something exclusive to the NES target itself.
     if(DEFINED ALTERNATIVE_NAMETABLE)
         target_compile_definitions(pnes PUBLIC "ALTERNATIVE_NAMETABLE=${ALTERNATIVE_NAMETABLE}")
     endif()
     target_link_libraries(pnes PUBLIC br0::intsh br0::tuple br0::consh)
 
-    # ------------------------------------------------------------------
-    # Where a 3DS save lives on the SD card.
-    #
-    # TWO NAMES AND NOT A PATH, for the Wii's and the Switch's reason (see
-    # WII_SAVE_DIR and NX_SAVE_DIR above): src/3ds/save.cpp assembles
-    # "sdmc:/3ds/<dir>/<file>" from them itself and static_asserts that neither
-    # contains a separator, because a CTR_SAVE_DIR with a slash in it would
-    # silently point the save somewhere else -- possibly into another homebrew
-    # app's directory under sdmc:/3ds.
-    #
-    # "3ds" IS NOT A KNOB. It is the fixed parent the backend adds: the Homebrew
-    # Launcher lists .3dsx files from sdmc:/3ds and homebrew keeps its data
-    # under it by convention, so CTR_SAVE_DIR names one directory inside that
-    # and nothing a project sets can put a save in the card's root -- which on
-    # this console is shared with the system's own Nintendo 3DS directory.
-    #
-    # CTR_SAVE_DIR IS THE ONE THAT CANNOT MOVE LATER, exactly as the Wii's and
-    # the Switch's cannot: this backend's search is PATH-based (there is no
-    # equivalent of CARD_FindFirst's gamecode filter on a filesystem), so a
-    # build that renames either knob stops finding every save written by every
-    # earlier build. The data is still on the card and the game simply reports
-    # that there is no save -- which looks like a bug in the card, so it is
-    # worth saying here and not only in the backend.
-    #
-    # NO SAVEDATA OR EXTDATA KNOBS (title id, extdata id, save partition size),
-    # deliberately: this backend saves to the SD card because a .3dsx has no
-    # title of its own to address either archive by. See src/3ds/save.cpp's
-    # header comment for the three things a CIA-installed build would change.
-    # ------------------------------------------------------------------
     set(CTR_SAVE_DIR      "super_mary_sisters" CACHE STRING "3DS save directory under sdmc:/3ds")
     set(CTR_SAVE_FILENAME "save.dat"           CACHE STRING "3DS save file name inside CTR_SAVE_DIR")
 
-    # Checked here as well as by save.cpp's own static_asserts, so that a bad
-    # value set in local.cmake names itself at configure time rather than as a
-    # static_assert in a backend the setter may never have opened.
     foreach(_ctr_knob CTR_SAVE_DIR CTR_SAVE_FILENAME)
         string(LENGTH "${${_ctr_knob}}" _ctr_knob_len)
         if(_ctr_knob_len EQUAL 0 OR _ctr_knob_len GREATER 255)
@@ -2485,38 +1131,15 @@ elseif(TARGET_PLATFORM STREQUAL "ctr")
         endif()
     endforeach()
 
-    # PRIVATE for the reason the OGC and Switch backends' own location knobs
-    # are: the save's location is the backend's business, and nothing a game
-    # includes reads it. A game that wants to show a player where its save went
-    # asks ::save::GetDeviceStatus, which answers with the complete path.
     target_compile_definitions(pnes PRIVATE
             "CTR_SAVE_DIR=\"${CTR_SAVE_DIR}\""
             "CTR_SAVE_FILENAME=\"${CTR_SAVE_FILENAME}\"")
 
 
-    # AUDIO ASSETS, BOTH KINDS, INTO THE .3dsx's RomFS -- which is why this
-    # branch has a RomFS at all now: everything else the 3DS build needs is
-    # #embedded (CHR art) or generated, so src/3ds/audio.cpp is its first and
-    # only filesystem consumer.
-    #
-    # ndsp's own rate is NDSP_SAMPLE_RATE (SYSCLOCK_SOC / 512 = 32728.5Hz), so
-    # both kinds are encoded to 32728 and the DSP's resampler has nothing to do
-    # for either. That is the one number this and src/3ds/audio.cpp have to
-    # agree on; the backend reads the MUSIC's rate back out of the OGG header
-    # (so a re-encode retunes the voice rather than detuning the song) and takes
-    # the EFFECTS' rate from its own ::SFX_RATE constant, there being no header
-    # on raw PCM to ask.
     find_program(FFMPEG ffmpeg REQUIRED)
     set(CTR_AUDIO_RATE 32728)
     set(CTR_ROMFS ${CMAKE_BINARY_DIR}/romfs)
 
-    # THE MUSIC STREAMS AS VORBIS, not as the raw PCM the Switch ships: the
-    # desktop WAV is 47MB and raw stereo at this rate is still ~32MB, which is
-    # more than an o3DS gives a .3dsx for everything put together. ~4MB of OGG
-    # stays on the SD card and src/3ds/audio.cpp decodes it with stb_vorbis's
-    # FILE api (stb_vorbis_open_filename, hence a RomFS path rather than an
-    # #embed like the PSP/GameCube do) on its own thread -- the same
-    # transcode-and-stream shape as those two, for the same reason.
     FetchContent_Declare(
             stb
             GIT_REPOSITORY https://github.com/nothings/stb.git
@@ -2525,10 +1148,6 @@ elseif(TARGET_PLATFORM STREQUAL "ctr")
     FetchContent_MakeAvailable(stb)
     target_include_directories(pnes PRIVATE ${stb_SOURCE_DIR})
 
-    # ctr_create_3dsx() validates the RomFS dir exists at CONFIGURE time, but
-    # everything inside it is produced at BUILD time (below). Create the tree
-    # now so configure passes; the build steps then fill it. Same arrangement as
-    # the Switch branch's nx_create_nro().
     file(MAKE_DIRECTORY ${CTR_ROMFS}/tracks)
     file(MAKE_DIRECTORY ${CTR_ROMFS}/sfx)
 
@@ -2543,21 +1162,6 @@ elseif(TARGET_PLATFORM STREQUAL "ctr")
             COMMENT "Encoding 3DS audio: pc_audio.wav -> RomFS pc_audio.ogg (Vorbis ${CTR_AUDIO_RATE}Hz)"
             VERBATIM)
 
-    # THE EFFECTS AS RAW PCM, through the same pipeline and into the same image.
-    # Not Vorbis, for the reason the GameCube branch embeds raw too: a few
-    # hundred milliseconds each (~215KB for this project's five at this rate) is
-    # not worth a decode at startup. NDSP_FORMAT_STEREO_PCM16 is native-endian
-    # on a little-endian ARM11, so s16le -- the gc/wii branch writes s16be for
-    # ASND and that pair is not interchangeable.
-    #
-    # The names and the subdirectory come from the APPLICATION's own effect
-    # table (demo/ui/impl/sounds.hpp lists sfx/<Name>.ogg, and the backend swaps
-    # the extension), not from a convention this branch invents.
-    #
-    # Same trailing-silence trim as the Switch/gc/wii branches, for the same
-    # reason and with the same (non-)effect on how an effect sounds -- see the
-    # long note on the gc/wii one. Kept identical so the pipelines cannot drift
-    # into producing audibly different assets from one source.
     set(CTR_SFX_DIR ${CMAKE_SOURCE_DIR}/demo/audio/sfx CACHE PATH
             "Directory of the project's one-shot sound effects (*.ogg), \
 transcoded into the .3dsx's RomFS as sfx/<name>.raw.")
@@ -2588,44 +1192,19 @@ transcoded into the .3dsx's RomFS as sfx/<name>.raw.")
     file(GLOB DEMO_GAMEOPTIONS_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/demo/gen/gameOptions/${DEMO_TITLE_DIR}/*.cpp")
     list(APPEND DEMO_SOURCES ${DEMO_GAMEOPTIONS_SOURCES})
 
-    # chr_rom.cpp #embeds the packed blob (demo/chr/chr.bin) and emits it as the
-    # cartridge's CHR ROM image. The blob is a blobman output, not a source file,
-    # so declare it explicitly: repacking it must retrigger that compile.
     set_source_files_properties(${CMAKE_SOURCE_DIR}/demo/src/graphics/chr_rom.cpp
             PROPERTIES OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/demo/chr/chr.bin")
 
-    # THE `demo` TARGET IS THE PACKAGED DELIVERABLE, NOT THE BARE ELF.
-    # devkitPro's packaging helpers (ctr_create_3dsx, nx_create_nro,
-    # wut_create_wuhb, nds_create_rom) each add their OWN separate ALL target on
-    # top of the executable, so building just `demo` used to stop at demo.elf and
-    # leave demo_3dsx/demo_nro/demo_wuhb/demo_nds (and the .smdh/.nacp they pull
-    # in) as extra targets to build by hand. A target can't depend on something
-    # that depends on itself, so the linked ELF is `demo_elf` here (its output is
-    # still demo.elf, via OUTPUT_NAME) and the helper is handed the name `demo`
-    # with TARGET pointing at the ELF: `--target demo` now yields the final
-    # artifact. Every console branch that packages through such a helper does
-    # this; the ones that package with a POST_BUILD step (GC/Wii, PSP, GBA,
-    # NES, desktop) already had one target and are unchanged.
     add_executable(demo_elf ${DEMO_SOURCES})
     set_target_properties(demo_elf PROPERTIES OUTPUT_NAME demo SUFFIX ".elf")
     target_link_libraries(demo_elf PRIVATE pnes citro2d citro3d ctru m)
 
-    # The RomFS is consumed by the PACKAGING step below, not by any compile
-    # (nothing #embeds these), so this edge is pure ordering: hung off the ELF
-    # like the Switch branch's, since ctr_create_3dsx already depends on that.
     add_dependencies(demo_elf ctr-assets)
 
-    # See the TARGET_NES branch's own comment on this same call for GEN_TARGET_DIR.
     target_compile_definitions(demo_elf PRIVATE "GEN_TARGET_DIR=${DEMO_TITLE_DIR}")
 
-    # CHR art is pulled in with #embed (C23). devkitARM's GCC supports it without
-    # a diagnostic here; keep the Clang-only silencer guard for parity with the
-    # other branches (no-op under GCC).
     target_compile_options(demo_elf PRIVATE $<$<CXX_COMPILER_ID:Clang>:-Wno-c23-extensions>)
 
-    # Enable LTO for release-type configs, mirroring the OGC + desktop branches:
-    # the software PPU (emu::GenerateFrame) spans the static lib and the demo's
-    # per-frame IRQ handlers, so cross-module inlining matters on the hot path.
     include(CheckIPOSupported)
     check_ipo_supported(RESULT _ipo_ok OUTPUT _ipo_err)
     if(_ipo_ok)
@@ -2638,12 +1217,6 @@ transcoded into the .3dsx's RomFS as sfx/<name>.raw.")
         message(STATUS "IPO/LTO not supported by this toolchain: ${_ipo_err}")
     endif()
 
-    # Wrap the linked ELF as a .3dsx (homebrew loader format) with an SMDH icon/
-    # metadata banner. Both helpers come from devkitARM's Tools3DS.cmake once the
-    # 3DS toolchain is active. The packaging target is named `demo` (see the
-    # note on add_executable above); demo.smdh is only a custom-command output
-    # it depends on, not a target of its own. TARGET names the ELF and, since
-    # OUTPUT isn't given, the helper writes ${CMAKE_BINARY_DIR}/demo.3dsx.
     ctr_generate_smdh(demo.smdh
             NAME "pnes demo"
             DESCRIPTION "NES engine demo on 3DS (citro2d)"
@@ -2655,20 +1228,6 @@ transcoded into the .3dsx's RomFS as sfx/<name>.raw.")
             ROMFS ${CTR_ROMFS}
     )
 
-    # ----------------------------------------------------------------------
-    # Nintendo Switch target (libnx), via the devkitA64 toolchain.
-    #
-    # The Switch presents the shared software PPU (src/emu) like the SDL/3DS
-    # backends: emu::GenerateFrame rasterises a 256x240 ARGB frame and the CPU
-    # integer-scales it into the libnx framebuffer. The Tegra is wildly
-    # overpowered for NES-resolution pixels, so a straight scale-blit avoids
-    # pulling in deko3d/EGL for this first pass.
-    #
-    # The toolchain file (Switch.cmake) is supplied via the switch-* presets; it
-    # sets CMAKE_SYSTEM_NAME=NintendoSwitch and, through Platform/NXTools.cmake,
-    # the arch flags and the nx_generate_nacp() / nx_create_nro() helpers used
-    # below. libnx is linked explicitly (the toolchain does not auto-link it).
-    # ----------------------------------------------------------------------
     elseif(TARGET_PLATFORM STREQUAL "switch")
         project(pnes CXX)
 
@@ -2678,10 +1237,6 @@ transcoded into the .3dsx's RomFS as sfx/<name>.raw.")
 
         set(DEMO_TITLE_DIR switch)
 
-        # The Switch backend presents the shared software PPU (src/emu): the
-        # emulator and all the nametable/OAM/palette write functions are
-        # platform-agnostic and compiled here alongside the libnx framebuffer
-        # video/present, the hid input, and the audout audio.
         file(GLOB NX_SOURCES CONFIGURE_DEPENDS src/switch/*.cpp src/emu/*.cpp src/emu/mappers/*.cpp)
         file(GLOB_RECURSE ALL_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/all/*.cpp)
         add_library(pnes STATIC ${NX_SOURCES} ${ALL_SOURCES})
@@ -2689,51 +1244,15 @@ transcoded into the .3dsx's RomFS as sfx/<name>.raw.")
                 ${CMAKE_SOURCE_DIR}/include
                 ${CMAKE_SOURCE_DIR}/include/umbrella
         )
-        # TARGET_NX is the group the engine headers gate on (emulated PPU, fixed
-        # 32x30 viewport, no SDL headers -- same family as TARGET_OGC/TARGET_CTR).
         target_compile_definitions(pnes PUBLIC TARGET_NX)
-        # Alternative nametable wiring (see the TARGET_NES branch's own comment,
-        # near the top of this file): a fact about which board a build is
-        # modeling, not something exclusive to the NES target itself.
         if(DEFINED ALTERNATIVE_NAMETABLE)
             target_compile_definitions(pnes PUBLIC "ALTERNATIVE_NAMETABLE=${ALTERNATIVE_NAMETABLE}")
         endif()
         target_link_libraries(pnes PUBLIC br0::intsh br0::tuple br0::consh)
 
-        # ------------------------------------------------------------------
-        # Where a Switch save lives on the SD card.
-        #
-        # TWO NAMES AND NOT A PATH, for the Wii's reason (see WII_SAVE_DIR
-        # above): src/switch/save.cpp assembles "sdmc:/switch/<dir>/<file>"
-        # from them itself and static_asserts that neither contains a
-        # separator, because an NX_SAVE_DIR with a slash in it would silently
-        # point the save somewhere else -- possibly into another homebrew app's
-        # directory under sdmc:/switch.
-        #
-        # "switch" IS NOT A KNOB. It is the fixed parent the backend adds:
-        # hbmenu lists .nro files from sdmc:/switch and homebrew keeps its data
-        # under it by convention, so NX_SAVE_DIR names one directory inside
-        # that and nothing a project sets can put a save in the card's root.
-        #
-        # NX_SAVE_DIR IS THE ONE THAT CANNOT MOVE LATER, exactly as the Wii's
-        # cannot: this backend's search is PATH-based (there is no equivalent of
-        # CARD_FindFirst's gamecode filter on a filesystem), so a build that
-        # renames either knob stops finding every save written by every earlier
-        # build. The data is still on the card and the game simply reports that
-        # there is no save -- which looks like a bug in the card, so it is worth
-        # saying here and not only in the backend.
-        #
-        # NO SAVEDATA KNOBS (title id, account, NACP save-data sizes),
-        # deliberately: this backend saves to the SD card because an .nro has no
-        # savedata image of its own. See src/switch/save.cpp's header comment
-        # for the three things an installed title would change.
-        # ------------------------------------------------------------------
         set(NX_SAVE_DIR      "super_mary_sisters" CACHE STRING "Switch save directory under sdmc:/switch")
         set(NX_SAVE_FILENAME "save.dat"           CACHE STRING "Switch save file name inside NX_SAVE_DIR")
 
-        # Checked here as well as by save.cpp's own static_asserts, so that a
-        # bad value set in local.cmake names itself at configure time rather
-        # than as a static_assert in a backend the setter may never have opened.
         foreach(_nx_knob NX_SAVE_DIR NX_SAVE_FILENAME)
             string(LENGTH "${${_nx_knob}}" _nx_knob_len)
             if(_nx_knob_len EQUAL 0 OR _nx_knob_len GREATER 255)
@@ -2748,10 +1267,6 @@ transcoded into the .3dsx's RomFS as sfx/<name>.raw.")
             endif()
         endforeach()
 
-        # PRIVATE for the reason the OGC backend's own location knobs are: the
-        # save's location is the backend's business, and nothing a game includes
-        # reads it. A game that wants to show a player where its save went asks
-        # ::save::GetDeviceStatus, which answers with the complete path.
         target_compile_definitions(pnes PRIVATE
                 "NX_SAVE_DIR=\"${NX_SAVE_DIR}\""
                 "NX_SAVE_FILENAME=\"${NX_SAVE_FILENAME}\"")
@@ -2764,26 +1279,17 @@ transcoded into the .3dsx's RomFS as sfx/<name>.raw.")
         file(GLOB DEMO_GAMEOPTIONS_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/demo/gen/gameOptions/${DEMO_TITLE_DIR}/*.cpp")
         list(APPEND DEMO_SOURCES ${DEMO_GAMEOPTIONS_SOURCES})
 
-        # chr_rom.cpp #embeds the packed blob (demo/chr/chr.bin) and emits it as the
-        # cartridge's CHR ROM image. The blob is a blobman output, not a source file,
-        # so declare it explicitly: repacking it must retrigger that compile.
         set_source_files_properties(${CMAKE_SOURCE_DIR}/demo/src/graphics/chr_rom.cpp
                 PROPERTIES OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/demo/chr/chr.bin")
 
-        # `demo` is the packaged .nro, `demo_elf` the linked ELF -- see the note
-        # on the 3DS branch's add_executable for why.
         add_executable(demo_elf ${DEMO_SOURCES})
         set_target_properties(demo_elf PROPERTIES OUTPUT_NAME demo SUFFIX ".elf")
         target_link_libraries(demo_elf PRIVATE pnes nx)
 
-        # See the TARGET_NES branch's own comment on this same call for GEN_TARGET_DIR.
         target_compile_definitions(demo_elf PRIVATE "GEN_TARGET_DIR=${DEMO_TITLE_DIR}")
 
-        # CHR art is pulled in with #embed (C23); keep the Clang-only silencer for
-        # parity with the other branches (no-op under devkitA64's GCC).
         target_compile_options(demo_elf PRIVATE $<$<CXX_COMPILER_ID:Clang>:-Wno-c23-extensions>)
 
-        # Enable LTO for release-type configs, mirroring the other branches.
         include(CheckIPOSupported)
         check_ipo_supported(RESULT _ipo_ok OUTPUT _ipo_err)
         if(_ipo_ok)
@@ -2796,19 +1302,10 @@ transcoded into the .3dsx's RomFS as sfx/<name>.raw.")
             message(STATUS "IPO/LTO not supported by this toolchain: ${_ipo_err}")
         endif()
 
-        # libnx audout is fixed at 48kHz/2ch/s16, so encode the desktop WAV to
-        # exactly that raw PCM at build time and bake it into the .nro RomFS
-        # (src/switch/audio.cpp streams it). ffmpeg is provided by
-        # docker/Dockerfile.switch. This leaves demo/audio/tracks (the lossless
-        # WAV) untouched for desktop -- the conversion output lives only in the
-        # build tree.
         find_program(FFMPEG ffmpeg REQUIRED)
         set(NX_ROMFS ${CMAKE_BINARY_DIR}/romfs)
         set(NX_RAW   ${NX_ROMFS}/tracks/pc_audio.raw)
         set(NX_WAV   ${CMAKE_SOURCE_DIR}/demo/audio/tracks/pc_audio.wav)
-        # nx_create_nro() validates the RomFS dir exists at configure time, but
-        # the audio asset inside it is only produced at build time (below). Create
-        # the directory now so configure passes; the build step then fills it.
         file(MAKE_DIRECTORY ${NX_ROMFS}/tracks)
         add_custom_command(
                 OUTPUT ${NX_RAW}
@@ -2818,25 +1315,6 @@ transcoded into the .3dsx's RomFS as sfx/<name>.raw.")
                 DEPENDS ${NX_WAV}
                 COMMENT "Encoding Switch audio: pc_audio.wav -> RomFS pc_audio.raw (48k s16le)"
                 VERBATIM)
-        # The EFFECTS, through the same pipeline and into the same RomFS. This
-        # step was missing, which is the whole of why the Switch has been
-        # silent: src/switch/audio.cpp has a complete SFX mixer and resolves
-        # each registered entry to romfs:/<fp with .raw> (its ::romfs_raw_path),
-        # but only tracks/pc_audio.raw was ever put in the image -- so every
-        # fopen failed, every length stayed 0, and SfxPlay returned without
-        # sounding. The names and the subdirectory therefore come from the
-        # application's own table (demo/ui/impl/sounds.hpp lists sfx/Name.ogg),
-        # not from a convention this branch invents.
-        #
-        # s16LE here and s16BE in the gc/wii branch, because the formats are
-        # read by different hardware: audout takes native-endian PCM on a
-        # little-endian ARM, while ASND's VOICE_STEREO_16BIT is big-endian.
-        #
-        # Same trailing-silence trim as the gc/wii branch, for the same reason
-        # and with the same (non-)effect on how an effect sounds -- see the long
-        # note there. It matters a little less here (the Switch has RAM to
-        # waste) and is kept identical so the two pipelines cannot drift into
-        # producing audibly different assets from one source.
         set(NX_SFX_DIR ${CMAKE_SOURCE_DIR}/demo/audio/sfx CACHE PATH
                 "Directory of the project's one-shot sound effects (*.ogg), \
 transcoded into the .nro's RomFS as sfx/<name>.raw.")
@@ -2862,11 +1340,6 @@ transcoded into the .nro's RomFS as sfx/<name>.raw.")
         add_custom_target(switch-assets DEPENDS ${NX_RAW} ${NX_SFX_OUTPUTS})
         add_dependencies(demo_elf switch-assets)
 
-        # Wrap the linked ELF as a homebrew .nro with a NACP metadata banner and
-        # the RomFS asset tree. Both helpers come from devkitA64's NXTools.cmake
-        # once the Switch toolchain is active. The packaging target is `demo`;
-        # demo.nacp is only a custom-command output it depends on, not a target,
-        # and (no OUTPUT given) the .nro lands at ${CMAKE_BINARY_DIR}/demo.nro.
         nx_generate_nacp(demo.nacp
                 NAME "pnes demo"
                 AUTHOR "brette"
@@ -2878,25 +1351,6 @@ transcoded into the .nro's RomFS as sfx/<name>.raw.")
                 ROMFS ${NX_ROMFS}
         )
 
-    # ----------------------------------------------------------------------
-    # Native Wii U target (devkitPPC + wut + the SDL2 Wii U portlib).
-    #
-    # This is the NATIVE Cafe OS target (.rpx / .wuhb), distinct from the Wii
-    # .dol the gc/wii branch above produces (which runs on Wii U only through
-    # vWii). The Espresso is wildly overpowered for an NES frame, so -- like the
-    # Switch/3DS branches -- this presents the shared software PPU (src/emu):
-    # emu::GenerateFrame rasterises one widescreen ARGB frame straight into an
-    # SDL2 streaming texture that the GPU scales to fill the window.
-    #
-    # The whole backend (src/wiiu) is ordinary SDL2: the devkitPro wiiu-sdl2
-    # portlib wraps GX2 + ProcUI + the TV scan buffer + VPAD/KPAD controllers
-    # internally. This is SDL2 -- separate from the SDL3 desktop backend -- so no
-    # code is shared with src/SDL3.
-    #
-    # The toolchain file (WiiU.cmake) is supplied via the wiiu-* presets; it sets
-    # CMAKE_SYSTEM_NAME=CafeOS and, through Platform/CafeOS.cmake, the Espresso
-    # arch flags and the wut_create_rpx() / wut_create_wuhb() helpers used below.
-    # ----------------------------------------------------------------------
     elseif(TARGET_PLATFORM STREQUAL "wiiu")
         project(pnes CXX)
 
@@ -2906,15 +1360,8 @@ transcoded into the .nro's RomFS as sfx/<name>.raw.")
 
         set(DEMO_TITLE_DIR "wii u")
 
-        # The SDL2 Wii U portlib (devkitPro package wiiu-sdl2). Its CMake config
-        # provides the SDL2::SDL2-static imported target, whose interface pulls in
-        # the GX2/coreinit/VPAD system libs it wraps.
         find_package(SDL2 REQUIRED)
 
-        # The Wii U backend presents the shared software PPU (src/emu): the
-        # emulator and all the nametable/OAM/palette write functions are
-        # platform-agnostic and compiled here alongside the SDL2 video/present,
-        # the SDL2 GameController input, and the SDL2 audio.
         file(GLOB WIIU_SOURCES CONFIGURE_DEPENDS src/wiiu/*.cpp src/emu/*.cpp src/emu/mappers/*.cpp)
         file(GLOB_RECURSE ALL_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/all/*.cpp)
         add_library(pnes STATIC ${WIIU_SOURCES} ${ALL_SOURCES})
@@ -2922,67 +1369,15 @@ transcoded into the .nro's RomFS as sfx/<name>.raw.")
                 ${CMAKE_SOURCE_DIR}/include
                 ${CMAKE_SOURCE_DIR}/include/umbrella
         )
-        # TARGET_WIIU is the native-Wii-U define; the engine headers give it a
-        # runtime viewport -- 52x30 (416x240) widescreen or 40x30 (320x240) at
-        # 4:3, chosen at init from AVMGetTVAspectRatio since the Wii U's TV
-        # aspect is a system setting (src/wiiu/video.cpp) -- and exclude the
-        # SDL3 headers (this backend uses SDL2).
         target_compile_definitions(pnes PUBLIC TARGET_WIIU)
-        # Alternative nametable wiring (see the TARGET_NES branch's own comment,
-        # near the top of this file): a fact about which board a build is
-        # modeling, not something exclusive to the NES target itself.
         if(DEFINED ALTERNATIVE_NAMETABLE)
             target_compile_definitions(pnes PUBLIC "ALTERNATIVE_NAMETABLE=${ALTERNATIVE_NAMETABLE}")
         endif()
         target_link_libraries(pnes PUBLIC SDL2::SDL2-static br0::intsh br0::tuple br0::consh)
 
-        # ------------------------------------------------------------------
-        # Where a Wii U save lives on the SD card.
-        #
-        # TWO NAMES AND NOT A PATH, for the Wii's, the Switch's and the 3DS's
-        # reason (see WII_SAVE_DIR, NX_SAVE_DIR and CTR_SAVE_DIR above):
-        # src/wiiu/save.cpp assembles "fs:/vol/external01/wiiu/<dir>/<file>"
-        # from them itself and static_asserts that neither contains a
-        # separator, because a WIIU_SAVE_DIR with a slash in it would silently
-        # point the save somewhere else -- possibly into another homebrew app's
-        # directory under sd:/wiiu.
-        #
-        # "wiiu" IS NOT A KNOB. It is the fixed parent the backend adds: the
-        # Homebrew Launcher and Aroma list applications from sd:/wiiu/apps and
-        # homebrew keeps its data under sd:/wiiu by convention, so
-        # WIIU_SAVE_DIR names one directory inside that and nothing a project
-        # sets can put a save in the card's root -- which on this console is
-        # shared with the system's own directories.
-        #
-        # NO LINK LIBRARY GOES WITH THIS, unlike the Wii's `fat`: the backend
-        # is stdio against the devoptab wut's own startup mounts, and the one
-        # non-stdio call it makes (WHBMountSdCard, for a card inserted after
-        # launch) lives in libwut.a, which Platform/CafeOS.cmake already links
-        # as a standard library.
-        #
-        # WIIU_SAVE_DIR IS THE ONE THAT CANNOT MOVE LATER, exactly as the
-        # Wii's, the Switch's and the 3DS's cannot: this backend's search is
-        # PATH-based (there is no equivalent of CARD_FindFirst's gamecode
-        # filter on a filesystem), so a build that renames either knob stops
-        # finding every save written by every earlier build. The data is still
-        # on the card and the game simply reports that there is no save --
-        # which looks like a bug in the card, so it is worth saying here and
-        # not only in the backend.
-        #
-        # NO SAVEDATA KNOBS (account slot, quota size), deliberately, and NOT
-        # for the Switch's and the 3DS's reason -- this target HAS a title id
-        # of its own (WIIU_TITLE_ID below). The save still goes to the SD card
-        # because /vol/save is not a devoptab path at all and because that
-        # title id is a placeholder a project is expected to override, which
-        # would strand every save written under the previous one. See
-        # src/wiiu/save.cpp's header comment.
-        # ------------------------------------------------------------------
         set(WIIU_SAVE_DIR      "super_mary_sisters" CACHE STRING "Wii U save directory under sd:/wiiu")
         set(WIIU_SAVE_FILENAME "save.dat"           CACHE STRING "Wii U save file name inside WIIU_SAVE_DIR")
 
-        # Checked here as well as by save.cpp's own static_asserts, so that a
-        # bad value set in local.cmake names itself at configure time rather
-        # than as a static_assert in a backend the setter may never have opened.
         foreach(_wiiu_knob WIIU_SAVE_DIR WIIU_SAVE_FILENAME)
             string(LENGTH "${${_wiiu_knob}}" _wiiu_knob_len)
             if(_wiiu_knob_len EQUAL 0 OR _wiiu_knob_len GREATER 255)
@@ -2997,21 +1392,10 @@ transcoded into the .nro's RomFS as sfx/<name>.raw.")
             endif()
         endforeach()
 
-        # PRIVATE for the reason the OGC, Switch and 3DS backends' own location
-        # knobs are: the save's location is the backend's business, and nothing
-        # a game includes reads it. A game that wants to show a player where its
-        # save went asks ::save::GetDeviceStatus, which answers with the
-        # complete path.
         target_compile_definitions(pnes PRIVATE
                 "WIIU_SAVE_DIR=\"${WIIU_SAVE_DIR}\""
                 "WIIU_SAVE_FILENAME=\"${WIIU_SAVE_FILENAME}\"")
 
-        # The music is EMBEDDED in the .rpx, not loaded from disk: a native Wii U
-        # title only has a /vol/content mount when launched with its packaged
-        # content, and a bare .rpx (e.g. dropped into Cemu) has none. So encode
-        # the desktop WAV to a small Vorbis OGG and #embed it (src/wiiu/audio.cpp
-        # decodes it with stb_vorbis at startup) -- it then plays however the
-        # title is launched, and the artifact stays small.
         find_program(FFMPEG ffmpeg REQUIRED)
         FetchContent_Declare(
                 stb
@@ -3024,10 +1408,6 @@ transcoded into the .nro's RomFS as sfx/<name>.raw.")
         set(WIIU_ASSET_DIR ${CMAKE_BINARY_DIR}/wiiu-assets)
         set(WIIU_OGG ${WIIU_ASSET_DIR}/pc_audio.ogg)
         set(WIIU_WAV ${CMAKE_SOURCE_DIR}/demo/audio/tracks/pc_audio.wav)
-        # #embed reads pc_audio.ogg at compile time of audio.cpp; create the dir
-        # now so it is on the include path at configure, and (a) make the lib
-        # depend on the encode target so it runs first, (b) mark audio.cpp as
-        # depending on the OGG so editing the source WAV retriggers a recompile.
         file(MAKE_DIRECTORY ${WIIU_ASSET_DIR})
         add_custom_command(
                 OUTPUT ${WIIU_OGG}
@@ -3039,9 +1419,6 @@ transcoded into the .nro's RomFS as sfx/<name>.raw.")
                 VERBATIM)
         add_custom_target(wiiu-assets DEPENDS ${WIIU_OGG})
         add_dependencies(pnes wiiu-assets)
-        # audio.cpp resolves `#embed <pc_audio.ogg>` via --embed-dir (the canonical
-        # GCC mechanism; -I is not reliably searched for #embed). Scope both the
-        # search dir and the rebuild-on-change dependency to that one source.
         set_source_files_properties(${CMAKE_SOURCE_DIR}/src/wiiu/audio.cpp
                 PROPERTIES
                     OBJECT_DEPENDS  ${WIIU_OGG}
@@ -3054,32 +1431,17 @@ transcoded into the .nro's RomFS as sfx/<name>.raw.")
         file(GLOB DEMO_GAMEOPTIONS_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/demo/gen/gameOptions/${DEMO_TITLE_DIR}/*.cpp")
         list(APPEND DEMO_SOURCES ${DEMO_GAMEOPTIONS_SOURCES})
 
-        # chr_rom.cpp #embeds the packed blob (demo/chr/chr.bin) and emits it as the
-        # cartridge's CHR ROM image. The blob is a blobman output, not a source file,
-        # so declare it explicitly: repacking it must retrigger that compile.
         set_source_files_properties(${CMAKE_SOURCE_DIR}/demo/src/graphics/chr_rom.cpp
                 PROPERTIES OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/demo/chr/chr.bin")
 
-        # `demo` is the packaged .wuhb, `demo_elf` the linked ELF (the .rpx is a
-        # POST_BUILD step of it) -- see the note on the 3DS branch's
-        # add_executable for why.
         add_executable(demo_elf ${DEMO_SOURCES})
         set_target_properties(demo_elf PROPERTIES OUTPUT_NAME demo SUFFIX ".elf")
-        # The demo supplies its own main() via the RESET macro, so the backend
-        # builds with SDL_MAIN_HANDLED and SDL2main is deliberately NOT linked.
         target_link_libraries(demo_elf PRIVATE pnes)
 
-        # See the TARGET_NES branch's own comment on this same call for
-        # GEN_TARGET_DIR. Quoted: DEMO_TITLE_DIR is "wii u" (a space) on this
-        # branch, and an unquoted argument here would split on that space
-        # into two separate (wrong) compile definitions.
         target_compile_definitions(demo_elf PRIVATE "GEN_TARGET_DIR=${DEMO_TITLE_DIR}")
 
-        # CHR art is pulled in with #embed (C23); keep the Clang-only silencer for
-        # parity with the other branches (no-op under devkitPPC's GCC).
         target_compile_options(demo_elf PRIVATE $<$<CXX_COMPILER_ID:Clang>:-Wno-c23-extensions>)
 
-        # Enable LTO for release-type configs, mirroring the other branches.
         include(CheckIPOSupported)
         check_ipo_supported(RESULT _ipo_ok OUTPUT _ipo_err)
         if(_ipo_ok)
@@ -3092,44 +1454,14 @@ transcoded into the .nro's RomFS as sfx/<name>.raw.")
             message(STATUS "IPO/LTO not supported by this toolchain: ${_ipo_err}")
         endif()
 
-        # The SOUND EFFECTS, as the bundle's content tree.
-        #
-        # THE MUSIC IS STILL EMBEDDED in the .rpx (above), so it plays however
-        # the title is launched; the effects cannot be, because the table is the
-        # application's and #embed needs a literal path at the backend's compile
-        # time (src/wiiu/audio.cpp's header). That backend has always read them
-        # from /vol/content -- which is exactly what a .wuhb's content tree
-        # mounts as -- but nothing ever PUT them there: this bundle was built
-        # with no CONTENT at all, so every fopen failed and the finished SFX
-        # mixer in that file never had anything to mix. That is the whole bug.
-        #
-        # OGG, NOT RAW, unlike the Switch and gc/wii branches: this backend
-        # decodes with stb_vorbis and converts through SDL, so it wants the
-        # source files as they are. Copied rather than transcoded for that
-        # reason -- there is nothing to transcode.
-        #
-        # A bare .rpx dropped into Cemu still has no /vol/content mount and so
-        # still plays no effects. That is the documented behaviour of the
-        # backend's own path, and the music keeps playing either way.
         set(WIIU_CONTENT_DIR ${CMAKE_BINARY_DIR}/wuhb-content)
         set(WIIU_SFX_DIR ${CMAKE_SOURCE_DIR}/demo/audio/sfx CACHE PATH
                 "Directory of the project's one-shot sound effects (*.ogg), \
 copied into the .wuhb content tree (mounted at /vol/content).")
-        # wut_create_wuhb() checks IS_DIRECTORY on its CONTENT argument at
-        # CONFIGURE time, so the directory has to exist before the call below
-        # even though the copy that fills it runs at build time -- the same
-        # ordering the Switch branch's romfs dir needs.
         file(MAKE_DIRECTORY ${WIIU_CONTENT_DIR}/sfx)
-        # The OGGs by name, not copy_directory: demo/audio/sfx also holds
-        # nes_sfx_bank.s (the NES build's assembly wrapper around the FamiStudio
-        # export), and a whole-directory copy puts that inside the Wii U bundle.
-        # The gc/wii and Switch branches glob *.ogg for the same reason.
         file(GLOB WIIU_SFX_SOURCES CONFIGURE_DEPENDS ${WIIU_SFX_DIR}/*.ogg)
         set(WIIU_SFX_COPY "")
         if(WIIU_SFX_SOURCES)
-            # Guarded because `cmake -E copy_if_different` with no source files
-            # is an error, and a project that registers no effects is allowed:
-            # it then stages nothing and the content tree stays empty.
             set(WIIU_SFX_COPY COMMAND ${CMAKE_COMMAND} -E copy_if_different
                     ${WIIU_SFX_SOURCES} ${WIIU_CONTENT_DIR}/sfx)
         endif()
@@ -3138,17 +1470,8 @@ copied into the .wuhb content tree (mounted at /vol/content).")
                 ${WIIU_SFX_COPY}
                 COMMENT "Staging Wii U SFX: demo/audio/sfx/*.ogg -> /vol/content/sfx"
                 VERBATIM)
-        # On demo_elf, which is what the .wuhb command DEPENDS on (CafeOS.cmake
-        # passes CONTENT as a plain path, so the tree's own files are not
-        # dependencies of the bundle) -- so the copy is ordered before the
-        # packaging that reads it.
         add_dependencies(demo_elf wiiu-sfx-assets)
 
-        # Convert the linked ELF into an .rpx (the Cafe OS executable format) and
-        # package it as a .wuhb bundle (the Aroma/Homebrew-Launcher format). The
-        # music is embedded in the .rpx (above); the content tree carries the
-        # sound effects (see the note on it, just above). Both helpers come from
-        # wut's CafeOS.cmake.
         wut_create_rpx(demo_elf)
         wut_create_wuhb(demo
                 TARGET    demo_elf
@@ -3158,24 +1481,6 @@ copied into the .wuhb content tree (mounted at /vol/content).")
                 AUTHOR    "brette"
         )
 
-        # ------------------------------------------------------------------
-        # Optional: installable WUP title (the NON-homebrew path)
-        #
-        # The .rpx/.wuhb above are the homebrew artifacts (Aroma / HBL). For
-        # people who want to *install* their game as a real Wii U title --
-        # runnable with the system closed, no homebrew environment imposed --
-        # this assembles the unpacked code/content/meta tree a Wii U title
-        # needs and (when a common key is supplied) runs NUSPacker to encrypt
-        # it into an installable WUP (.app/.h3/.tmd/.tik/.cert).
-        #
-        # This is a separate `demo-wup` target, NOT part of the default build:
-        # the homebrew path stays key-free and self-contained, and the WUP
-        # path only kicks in when someone asks for it (and only *packs* when a
-        # key is present -- otherwise it still emits the tree for manual use).
-        # The Wii U common key is a copyrighted secret: it is NEVER committed,
-        # only passed in via WIIU_COMMON_KEY at build time (a CI secret / local
-        # cache var, as a 32-hex string or a path to a file containing one).
-        # ------------------------------------------------------------------
         set(WIIU_TITLE_ID     "000500001337C0DE" CACHE STRING "Wii U title id (16 hex)")
         set(WIIU_GROUP_ID     "0000C0DE"         CACHE STRING "Wii U group id (8 hex)")
         set(WIIU_PRODUCT_CODE "WUP-N-PNES"       CACHE STRING "Wii U product code")
@@ -3193,18 +1498,10 @@ copied into the .wuhb content tree (mounted at /vol/content).")
         set(WUP_META    ${WUP_DIR}/meta)
         set(WUP_OUT     ${CMAKE_BINARY_DIR}/wup-installable)
 
-        # The title metadata: configure_file substitutes the @WIIU_*@ tokens in
-        # the proven dimok HBL-channel templates (src/wiiu/title/*.in) at
-        # configure time, so editing a cache var re-emits the XMLs on reconfigure.
         configure_file(${CMAKE_SOURCE_DIR}/src/wiiu/title/app.xml.in  ${WUP_CODE}/app.xml  @ONLY)
         configure_file(${CMAKE_SOURCE_DIR}/src/wiiu/title/cos.xml.in  ${WUP_CODE}/cos.xml  @ONLY)
         configure_file(${CMAKE_SOURCE_DIR}/src/wiiu/title/meta.xml.in ${WUP_META}/meta.xml @ONLY)
 
-        # The menu artwork. The Wii U menu wants UNCOMPRESSED, top-left-origin
-        # TGAs at fixed sizes; derive them all from the existing demo/demo.png
-        # icon with ImageMagick so a title ships with art out of the box. (The
-        # boot sound, bootSound.btsnd, is optional -- the title boots silent
-        # without it -- so it is intentionally omitted.)
         find_program(IMAGEMAGICK_CONVERT NAMES magick convert)
         set(WUP_ICON  ${WUP_META}/iconTex.tga)
         set(WUP_BOOTTV  ${WUP_META}/bootTvTex.tga)
@@ -3212,8 +1509,6 @@ copied into the .wuhb content tree (mounted at /vol/content).")
         set(WUP_BOOTLOGO ${WUP_META}/bootLogoTex.tga)
         set(WIIU_ICON_SRC ${CMAKE_SOURCE_DIR}/demo/demo.png)
         if(IMAGEMAGICK_CONVERT)
-            # iconTex 128x128, bootTvTex 1280x720, bootDrcTex 854x480,
-            # bootLogoTex ~170x42 -- all uncompressed, top-left origin.
             set(_tga_opts -define tga:image-origin=TopLeft -compress none -type TrueColor)
             add_custom_command(OUTPUT ${WUP_ICON}
                     COMMAND ${IMAGEMAGICK_CONVERT} ${WIIU_ICON_SRC} -resize 128x128! ${_tga_opts} ${WUP_ICON}
@@ -3233,30 +1528,11 @@ copied into the .wuhb content tree (mounted at /vol/content).")
             set(WUP_TGAS "")
         endif()
 
-        # The packer step runs through a small -P script (cmake/wiiu_pack.cmake)
-        # so the "pack vs. skip when no key" decision happens at BUILD time, not
-        # configure time -- you can set WIIU_COMMON_KEY after configuring and
-        # just rebuild demo-wup. The script also reads the key from a file if a
-        # path was given, so a CI secret can be mounted as a file.
         add_custom_target(demo-wup
-                # The rpx is built by the demo target; drop it into code/ as the
-                # name cos.xml's argstr references.
                 COMMAND ${CMAKE_COMMAND} -E copy
                         ${CMAKE_CURRENT_BINARY_DIR}/${WIIU_RPX_NAME} ${WUP_CODE}/${WIIU_RPX_NAME}
-                # content/ is where an INSTALLED title's /vol/content comes
-                # from, so the sound effects go in it for the same reason they
-                # go in the .wuhb's content tree above -- an installed title
-                # with an empty content/ would be the one build of this game
-                # that still had no effects. The music stays embedded in the
-                # rpx, so nothing here is load-bearing for audio to exist at
-                # all. The .keep stays: NUSPacker requires a NON-EMPTY
-                # content/, and that must hold even for a project that
-                # registers no effects and so copies nothing.
                 COMMAND ${CMAKE_COMMAND} -E make_directory ${WUP_CONTENT}
                 COMMAND ${CMAKE_COMMAND} -E touch ${WUP_CONTENT}/.keep
-                # The staged tree the .wuhb is built from, so the two artifacts
-                # carry exactly the same content and only one place decides what
-                # belongs in it (notably: the OGGs, not nes_sfx_bank.s).
                 COMMAND ${CMAKE_COMMAND} -E copy_directory
                         ${WIIU_CONTENT_DIR} ${WUP_CONTENT}
                 COMMAND ${CMAKE_COMMAND}
@@ -3271,26 +1547,6 @@ copied into the .wuhb content tree (mounted at /vol/content).")
                 COMMENT "Assembling Wii U installable title (code/content/meta) and packing WUP"
                 VERBATIM)
 
-    # ----------------------------------------------------------------------
-    # Sony PSP target (pspsdk/pspdev), via the pspdev.cmake toolchain.
-    #
-    # Like the Switch/Wii U backends, the PSP presents the shared software PPU
-    # (src/emu): emu::GenerateFrame rasterises one widescreen ARGB frame and the
-    # CPU nearest-neighbour scale-blits it straight into VRAM through its
-    # uncached alias -- no GU (the PSP's GE/3D pipeline) at all, the same
-    # "skip the heavier GPU API for a first pass" call the Switch backend made
-    # against deko3d. See src/psp/video.cpp for the framebuffer/scaling details.
-    #
-    # Unlike every devkitPro target above, this is NOT a devkitPro toolchain:
-    # pspdev is its own separate SDK (psp-gcc/psp-g++, PSPDEV env var), and
-    # pspdev.cmake sets CMAKE_SYSTEM_NAME to plain "Generic" rather than
-    # anything PSP-specific -- so, uniquely among the console branches here,
-    # TARGET_PSP is NOT derived from CMAKE_SYSTEM_NAME and must be set
-    # explicitly below, same as the desktop branches do for their platforms.
-    # The toolchain file (via presets, $env{PSPDEV}/psp/share/pspdev.cmake)
-    # pulls in CreatePBP.cmake, whose create_pbp_file() helper packs the linked
-    # ELF into the single-file EBOOT.PBP homebrew format used below.
-    # ----------------------------------------------------------------------
     elseif(TARGET_PLATFORM STREQUAL "psp")
         project(pnes CXX)
 
@@ -3300,10 +1556,6 @@ copied into the .wuhb content tree (mounted at /vol/content).")
 
         set(DEMO_TITLE_DIR psp)
 
-        # The PSP backend presents the shared software PPU (src/emu): the
-        # emulator and all the nametable/OAM/palette write functions are
-        # platform-agnostic and compiled here alongside the raw-VRAM video/
-        # present, the pspctrl input, and the pspaudio streaming audio.
         file(GLOB PSP_SOURCES CONFIGURE_DEPENDS src/psp/*.cpp src/emu/*.cpp src/emu/mappers/*.cpp)
         file(GLOB_RECURSE ALL_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/all/*.cpp)
         add_library(pnes STATIC ${PSP_SOURCES} ${ALL_SOURCES})
@@ -3311,60 +1563,15 @@ copied into the .wuhb content tree (mounted at /vol/content).")
                 ${CMAKE_SOURCE_DIR}/include
                 ${CMAKE_SOURCE_DIR}/include/umbrella
         )
-        # TARGET_PSP is the group the engine headers gate on (emulated PPU,
-        # widescreen ~16:9 viewport shared with TARGET_NX/TARGET_WIIU, no SDL
-        # headers). See this branch's own header comment for why this can't be
-        # derived from CMAKE_SYSTEM_NAME the way the devkitPro branches' defines
-        # effectively are.
         target_compile_definitions(pnes PUBLIC TARGET_PSP)
-        # Alternative nametable wiring (see the TARGET_NES branch's own comment,
-        # near the top of this file): a fact about which board a build is
-        # modeling, not something exclusive to the NES target itself.
         if(DEFINED ALTERNATIVE_NAMETABLE)
             target_compile_definitions(pnes PUBLIC "ALTERNATIVE_NAMETABLE=${ALTERNATIVE_NAMETABLE}")
         endif()
         target_link_libraries(pnes PUBLIC br0::intsh br0::tuple br0::consh)
 
-        # ------------------------------------------------------------------
-        # Where a PSP save lives, and the one case where this gets to decide.
-        #
-        # THE DIRECTORY IS NORMALLY NOT A KNOB AT ALL, which is what makes this
-        # branch different from the four above it. src/psp/save.cpp puts the
-        # save beside the running EBOOT -- it asks getcwd(), which pspsdk's
-        # startup has already pointed at the folder the game was launched from
-        # -- so the directory is the one the PLAYER chose when they copied the
-        # game onto their Memory Stick, and the device is whichever one they
-        # launched it from (ms0: on a Fat/Slim/Go with a stick, ef0: on a PSP
-        # Go's internal flash). That is the whole reason the location is
-        # resolved at runtime on this console and compiled in on the others;
-        # see that file's header comment.
-        #
-        # SO PSP_SAVE_DIR IS THE FALLBACK AND NOTHING ELSE. It names the folder
-        # under ms0:/PSP/GAME used when the launch path cannot be discovered --
-        # a module the kernel started without an argv[0], or a path too long for
-        # pspsdk's own 255-character POSIX limit. A project that never meets
-        # either case never sees this value, and one that does gets a save in a
-        # directory of its own rather than in the stick's root.
-        #
-        # PSP_SAVE_FILENAME IS THE ONE THAT CANNOT MOVE LATER, for the Wii's and
-        # the Switch's reason: the backend's search is PATH-based, so a build
-        # that renames it stops finding every save written by every earlier
-        # build. The data is still on the stick and the game simply reports that
-        # there is no save -- which looks like a bug in the stick, so it is worth
-        # saying here and not only in the backend.
-        #
-        # NO SAVEDATA KNOBS (game id, PARAM.SFO fields, ICON0), deliberately:
-        # this backend writes a plain file because an XMB-visible savedata
-        # directory needs a game id a homebrew EBOOT does not own, and shows up
-        # as "Corrupted Data" without a PARAM.SFO. See src/psp/save.cpp's header
-        # comment for the three things an XMB-visible save would change.
-        # ------------------------------------------------------------------
         set(PSP_SAVE_DIR      "super_mary_sisters" CACHE STRING "PSP fallback save directory under ms0:/PSP/GAME")
         set(PSP_SAVE_FILENAME "save.dat"           CACHE STRING "PSP save file name, beside the running EBOOT")
 
-        # Checked here as well as by save.cpp's own static_asserts, so that a
-        # bad value set in local.cmake names itself at configure time rather
-        # than as a static_assert in a backend the setter may never have opened.
         foreach(_psp_knob PSP_SAVE_DIR PSP_SAVE_FILENAME)
             string(LENGTH "${${_psp_knob}}" _psp_knob_len)
             if(_psp_knob_len EQUAL 0 OR _psp_knob_len GREATER 255)
@@ -3379,22 +1586,10 @@ copied into the .wuhb content tree (mounted at /vol/content).")
             endif()
         endforeach()
 
-        # PRIVATE for the reason the other backends' location knobs are: the
-        # save's location is the backend's business, and nothing a game includes
-        # reads it. A game that wants to show a player where its save went asks
-        # ::save::GetDeviceStatus, which answers with the complete path -- which
-        # on this console is the only way to learn it, since the build does not
-        # know it.
         target_compile_definitions(pnes PRIVATE
                 "PSP_SAVE_DIR=\"${PSP_SAVE_DIR}\""
                 "PSP_SAVE_FILENAME=\"${PSP_SAVE_FILENAME}\"")
 
-        # The PSP Fat/Slim's 32-64MB of RAM can't hold the 47MB desktop
-        # pc_audio.wav decoded to raw PCM, so this follows the GameCube/Wii U
-        # shape: transcode to a small Vorbis OGG at build time and #embed it
-        # (src/psp/audio.cpp decodes it with stb_vorbis, streaming from a
-        # dedicated thread). Encoded straight to this backend's playback rate
-        # (44.1kHz, the PSP DAC's fixed rate) so no runtime resampling is needed.
         find_program(FFMPEG ffmpeg REQUIRED)
         FetchContent_Declare(
                 stb
@@ -3418,10 +1613,6 @@ copied into the .wuhb content tree (mounted at /vol/content).")
                 VERBATIM)
         add_custom_target(psp-assets DEPENDS ${PSP_OGG})
         add_dependencies(pnes psp-assets)
-        # audio.cpp resolves `#embed <pc_audio.ogg>` via --embed-dir (the
-        # canonical GCC mechanism; -I is not reliably searched for #embed).
-        # Scope both the search dir and the rebuild-on-change dependency to
-        # that one source.
         set_source_files_properties(${CMAKE_SOURCE_DIR}/src/psp/audio.cpp
                 PROPERTIES
                     OBJECT_DEPENDS  ${PSP_OGG}
@@ -3434,26 +1625,17 @@ copied into the .wuhb content tree (mounted at /vol/content).")
         file(GLOB DEMO_GAMEOPTIONS_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/demo/gen/gameOptions/${DEMO_TITLE_DIR}/*.cpp")
         list(APPEND DEMO_SOURCES ${DEMO_GAMEOPTIONS_SOURCES})
 
-        # chr_rom.cpp #embeds the packed blob (demo/chr/chr.bin) and emits it as the
-        # cartridge's CHR ROM image. The blob is a blobman output, not a source file,
-        # so declare it explicitly: repacking it must retrigger that compile.
         set_source_files_properties(${CMAKE_SOURCE_DIR}/demo/src/graphics/chr_rom.cpp
                 PROPERTIES OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/demo/chr/chr.bin")
 
         add_executable(demo ${DEMO_SOURCES})
-        # pspdev's own crt0/linking wants the raw ELF extension for
-        # create_pbp_file()/psp-fixup-imports below, not a bare "demo".
         set_target_properties(demo PROPERTIES SUFFIX ".elf")
         target_link_libraries(demo PRIVATE pnes pspdisplay pspctrl pspaudio pspge psppower)
 
-        # See the TARGET_NES branch's own comment on this same call for GEN_TARGET_DIR.
         target_compile_definitions(demo PRIVATE "GEN_TARGET_DIR=${DEMO_TITLE_DIR}")
 
-        # CHR art is pulled in with #embed (C23); keep the Clang-only silencer
-        # for parity with the other branches (no-op under psp-g++/GCC).
         target_compile_options(demo PRIVATE $<$<CXX_COMPILER_ID:Clang>:-Wno-c23-extensions>)
 
-        # Enable LTO for release-type configs, mirroring the other branches.
         include(CheckIPOSupported)
         check_ipo_supported(RESULT _ipo_ok OUTPUT _ipo_err)
         if(_ipo_ok)
@@ -3466,43 +1648,12 @@ copied into the .wuhb content tree (mounted at /vol/content).")
             message(STATUS "IPO/LTO not supported by this toolchain: ${_ipo_err}")
         endif()
 
-        # Pack the linked ELF into a single-file EBOOT.PBP homebrew image
-        # (create_pbp_file comes from pspdev.cmake's bundled CreatePBP.cmake).
-        # No ICON_PATH/BACKGROUND_PATH/PREVIEW_PATH art is supplied yet -- the
-        # PSP menu falls back to its default icon without them, same as an
-        # unset SMDH banner on the 3DS branch would.
         create_pbp_file(
                 TARGET      demo
                 TITLE       "pnes demo"
                 VERSION     "1.00"
         )
 
-    # ----------------------------------------------------------------------
-    # Sony PlayStation 2 target (ps2dev/ps2sdk + gsKit), via cmake/PS2.cmake
-    # (ps2dev ships no CMake toolchain of its own -- see that file).
-    #
-    # Unlike every emulated-PPU backend above, the PS2 does NOT run the shared
-    # software rasteriser (emu::GenerateFrame) and is not widescreen: the GS
-    # (Graphics Synthesizer) uploads the NES's native 256x240 frame as one
-    # texture and draws it as a single hardware-scaled, pillarboxed quad onto
-    # the fixed 640x448 NTSC screen, so video.hpp's viewport_tx()/viewport_ty()
-    # for TARGET_PS2 are 32x30 -- identical to the real NES -- rather than a
-    # "render more world" widescreen expansion. That's also why this branch
-    # reuses the PSP's demo/gen/title and demo/gen/gameOptions art instead of
-    # needing its own (see the DEMO_TITLE_DIR comment below for why PSP's,
-    # not the NES's own, despite the PS2's viewport matching the NES exactly).
-    #
-    # ps2sdk's own tamtypes.h already typedefs u8/u16/u32/u64/s8/s16/s32/s64 as
-    # ordinary global typedefs, so the real intsh dependency (whose
-    # `using namespace br0::intsh` would make those names ambiguous, breaking
-    # even ps2sdk's own headers -- see src/ps2/intsh_shim/intsh.hpp) is never
-    # fetched for this target. br0::intsh is aliased to a local shim instead,
-    # which supplies only the signed i8/i16/i32/i64 names tamtypes.h lacks
-    # (and #includes tamtypes.h itself, ahead of everything else -- see
-    # src/ps2/intsh_shim/intsh's own comment), so every shared engine header's
-    # unconditional `#include <intsh>; using namespace br0::intsh;` keeps
-    # working completely unmodified.
-    # ----------------------------------------------------------------------
     elseif(TARGET_PLATFORM STREQUAL "ps2")
         project(pnes CXX)
 
@@ -3514,16 +1665,6 @@ copied into the .wuhb content tree (mounted at /vol/content).")
         _make_consh_available()
         _fixup_fetched_cxx_std_targets()
 
-        # Reuse the PSP's generated title/options art, NOT the NES's: the
-        # NES's demo/gen/title|gameOptions|options/nes headers additionally
-        # #error without SYSMEM/TITLE/TITLE_DATA/OPTIONS/OPTIONS_DATA, which
-        # only mean anything for the real cartridge's bank-switched ROM
-        # layout (set in a developer's local.cmake) -- nonsensical for a PS2
-        # ELF with no such memory map. The PSP's own generated headers have
-        # no such requirement (same shared video.hpp/text.hpp calls, just
-        # without the NES-only bank placement), and PSP's panel is a
-        # superset of the PS2's native 32x30 (480x272 vs this branch's
-        # 256x240), so the same absolute tile coordinates fit here too.
         set(DEMO_TITLE_DIR psp)
 
         if(NOT DEFINED ENV{PS2SDK} OR NOT DEFINED ENV{GSKIT})
@@ -3534,27 +1675,8 @@ copied into the .wuhb content tree (mounted at /vol/content).")
         set(PS2SDK_ROOT "$ENV{PS2SDK}")
         set(GSKIT_ROOT  "$ENV{GSKIT}")
 
-        # The PS2 backend presents the shared software PPU (src/emu): the
-        # emulator and all the nametable/OAM/palette write functions are
-        # platform-agnostic and compiled here alongside the gsKit video/
-        # present, the libpad input, and the audsrv streaming audio.
         file(GLOB PS2_SOURCES CONFIGURE_DEPENDS src/ps2/*.cpp src/emu/*.cpp src/emu/mappers/*.cpp)
 
-        # Music backend. Each of the three defines the whole audio:: surface, so
-        # exactly one is compiled and the rest are dropped from the glob.
-        #
-        #   stream (default) src/ps2/audio_stream.cpp -- SPU2-format ADPCM
-        #                    decoded on the EE. Uses the shared pc_audio.wav at
-        #                    any length with no asset constraint and no size
-        #                    knob to get right, for a fraction of a percent of
-        #                    the EE. The portable default.
-        #   spu2             src/ps2/audio_spu2.cpp -- resident SPU2 hardware
-        #                    voice. Costs the EE literally nothing, but the
-        #                    sample must fit SPU2 sound RAM (~756KB measured),
-        #                    so it needs an asset trimmed to a short loop.
-        #   vorbis           src/ps2/audio.cpp -- stb_vorbis on the EE. Best
-        #                    compression, but the decode is what held this
-        #                    backend at ~55fps. Kept as a reference path.
         set(PS2_MUSIC "stream" CACHE STRING
                 "PS2 music backend: stream (EE-decoded ADPCM), spu2 (SPU2 hardware voice), vorbis")
         set_property(CACHE PS2_MUSIC PROPERTY STRINGS stream spu2 vorbis)
@@ -3586,16 +1708,7 @@ copied into the .wuhb content tree (mounted at /vol/content).")
                 ${PS2SDK_ROOT}/common/include
                 ${GSKIT_ROOT}/include
         )
-        # TARGET_PS2 is the group the engine headers gate on (NES-native
-        # 32x30 viewport, no SDL headers -- see this branch's header comment).
-        # _EE is what tamtypes.h/every ps2sdk header gates its EE-side
-        # declarations on; src/ps2/internal.hpp includes tamtypes.h before any
-        # engine header, so it must be visible from the very first TU, not
-        # just within src/ps2/.
         target_compile_definitions(pnes PUBLIC TARGET_PS2 _EE)
-        # Alternative nametable wiring (see the TARGET_NES branch's own comment,
-        # near the top of this file): a fact about which board a build is
-        # modeling, not something exclusive to the NES target itself.
         if(DEFINED ALTERNATIVE_NAMETABLE)
             target_compile_definitions(pnes PUBLIC "ALTERNATIVE_NAMETABLE=${ALTERNATIVE_NAMETABLE}")
         endif()
@@ -3607,22 +1720,6 @@ copied into the .wuhb content tree (mounted at /vol/content).")
         file(MAKE_DIRECTORY ${PS2_ASSET_DIR})
 
         if(PS2_MUSIC STREQUAL "stream")
-            # Downmix to mono at PS2_STREAM_RATE and encode to SPU2 ADPCM with
-            # ps2sdk's bin/adpenc. No -L: the loop flags it would set are
-            # instructions to the SPU2's voice hardware, and this backend
-            # doesn't play through a voice -- audio_stream.cpp loops in
-            # software, which also lets it honour a per-track loop_start.
-            #
-            # No size ceiling applies here (nothing has to fit SPU2 RAM), so the
-            # rate costs only ELF size: rate * seconds * 16/28 bytes, i.e.
-            # ~6.8MB for the current 4m29s track at 44.1kHz.
-            #
-            # 44100 rather than something smaller because the rate is NOT a free
-            # choice -- it is handed to audsrv_set_format(), which rejects
-            # formats it does not support, and 44100 is the rate the vorbis
-            # backend already proved works on this console. 22050 is the other
-            # safe value (ps2sdk's own playwav/playwav2 samples use it) and
-            # halves the size. An unproven 32000 produced silence.
             set(PS2_STREAM_RATE "44100" CACHE STRING
                     "Sample rate for the EE-decoded ADPCM music stream (44100 and 22050 are proven on hardware)")
             find_program(PS2_ADPENC adpenc HINTS ${PS2SDK_ROOT}/bin REQUIRED)
@@ -3640,46 +1737,15 @@ copied into the .wuhb content tree (mounted at /vol/content).")
                     VERBATIM)
             add_custom_target(ps2-assets DEPENDS ${PS2_ADP})
             set(PS2_AUDIO_ASSET ${PS2_ADP})
-            # audio_stream.cpp needs the rate the asset was actually encoded at
-            # to configure audsrv's output format; a mismatch plays at the
-            # wrong speed, so it is passed rather than guessed.
             set_source_files_properties(${PS2_AUDIO_SOURCE}
                     PROPERTIES COMPILE_DEFINITIONS "PS2_STREAM_RATE=${PS2_STREAM_RATE}")
         elseif(PS2_MUSIC STREQUAL "spu2")
-            # Downmix to mono at PS2_ADPCM_RATE, then encode to SPU2 ADPCM with
-            # ps2sdk's own bin/adpenc. -L sets the loop flag in the output's
-            # header and in the first ADPCM block, which is what makes the
-            # hardware voice loop with no software involvement at all.
-            #
-            # The rate is the whole budget question: SPU2 ADPCM is 16 bytes per
-            # 28 samples and the sample has to be resident in the SPU2's 2MB of
-            # sound RAM, so rate * seconds * 0.571 must stay under it. For the
-            # current 4m29s pc_audio.wav that means ~13.6kHz is the ceiling and
-            # 11025 (1.69MB, ~81% of SPU2 RAM) is the safe default. Trimming the
-            # asset to its musical loop is what buys fidelity back -- see
-            # src/ps2/audio_spu2.cpp's file header.
             set(PS2_ADPCM_RATE "11025" CACHE STRING
                     "Source sample rate for the SPU2 ADPCM music sample (mono; must fit SPU2's 2MB)")
 
-            # Diagnostic knob: 0 encodes the whole track, anything else
-            # truncates to that many seconds. ps2sdk's own playadpcm sample only
-            # ever loads a ~30KB sample, so a full-length one asks
-            # audsrv_load_adpcm() to do something ~56x larger than the path is
-            # demonstrated with -- if a short sample plays and a long one does
-            # not, the ceiling is SPU2 RAM or audsrv's RPC upload, not anything
-            # in src/ps2/audio_spu2.cpp.
-            # Defaults to 120s, not the whole track, because the whole track does
-            # not fit -- see PS2_ADPCM_MAX_BYTES below. 120s at 11025Hz is the
-            # largest configuration measured working on hardware.
             set(PS2_ADPCM_SECONDS "120" CACHE STRING
                     "Truncate the SPU2 ADPCM sample to N seconds (0 = whole track)")
 
-            # Measured on hardware, not derived from the SPU2's nominal 2MB:
-            # 756032 bytes plays correctly, 1134032 hangs the console during
-            # audio::Init. audsrv also reserves part of SPU2 sound RAM for its
-            # own PCM ring, which is why the usable ceiling is well under 2MB.
-            # Enforced by cmake/ps2_check_adpcm_size.cmake -- see that file for
-            # why this is a build error rather than something checked at runtime.
             set(PS2_ADPCM_MAX_BYTES "786432" CACHE STRING
                     "Hard limit for the encoded SPU2 ADPCM sample, in bytes")
             if(PS2_ADPCM_SECONDS STREQUAL "0")
@@ -3706,10 +1772,6 @@ copied into the .wuhb content tree (mounted at /vol/content).")
             add_custom_target(ps2-assets DEPENDS ${PS2_ADP})
             set(PS2_AUDIO_ASSET ${PS2_ADP})
         else()
-            # Same reasoning as the PSP branch: transcode the desktop
-            # pc_audio.wav to a small Vorbis OGG at build time and #embed it
-            # (src/ps2/audio.cpp decodes it with stb_vorbis, streaming from a
-            # dedicated EE thread).
             FetchContent_Declare(
                     stb
                     GIT_REPOSITORY https://github.com/nothings/stb.git
@@ -3732,11 +1794,6 @@ copied into the .wuhb content tree (mounted at /vol/content).")
         endif()
         add_dependencies(pnes ps2-assets)
 
-        # Either audio backend also #embeds ps2sdk's prebuilt audsrv.irx (see
-        # their file headers for why audsrv -- unlike the BIOS-resident
-        # SIO2MAN/PADMAN/LIBSD -- needs to be loaded this way); --embed-dir
-        # takes a single directory, so both embeds need their own dir on the
-        # search list.
         set_source_files_properties(${PS2_AUDIO_SOURCE}
                 PROPERTIES
                     OBJECT_DEPENDS  ${PS2_AUDIO_ASSET}
@@ -3749,37 +1806,21 @@ copied into the .wuhb content tree (mounted at /vol/content).")
         file(GLOB DEMO_GAMEOPTIONS_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/demo/gen/gameOptions/${DEMO_TITLE_DIR}/*.cpp")
         list(APPEND DEMO_SOURCES ${DEMO_GAMEOPTIONS_SOURCES})
 
-        # chr_rom.cpp #embeds the packed blob (demo/chr/chr.bin) and emits it as the
-        # cartridge's CHR ROM image. The blob is a blobman output, not a source file,
-        # so declare it explicitly: repacking it must retrigger that compile.
         set_source_files_properties(${CMAKE_SOURCE_DIR}/demo/src/graphics/chr_rom.cpp
                 PROPERTIES OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/demo/chr/chr.bin")
 
         add_executable(demo ${DEMO_SOURCES})
-        # ps2sdk's own linking wants the raw ELF extension, same as the PSP
-        # branch's EBOOT packing step wants a bare .elf to pack from.
         set_target_properties(demo PROPERTIES SUFFIX ".elf")
         target_link_directories(demo PRIVATE ${PS2SDK_ROOT}/ee/lib ${GSKIT_ROOT}/lib)
-        # gskit/gskit_toolkit/dmakit (gsKit + its DMA helper) and pad/audsrv
-        # are the only ps2sdk/gsKit libs this backend needs beyond what the
-        # compiler's own specs already link (libkernel/libcglue/libpthread*/
-        # libcdvd -- see cmake/PS2.cmake's header comment). patches (libpatches,
-        # sbv_patches.h) is needed on top of those: see audio.cpp's own comment
-        # on sbv_patch_enable_lmb() for why loading audsrv.irx from an EE RAM
-        # buffer (SifExecModuleBuffer, not a real rom0:/host: path) requires it.
         target_link_libraries(demo PRIVATE pnes
                 gskit gskit_toolkit dmakit
                 pad audsrv patches
         )
 
-        # See the TARGET_NES branch's own comment on this same call for GEN_TARGET_DIR.
         target_compile_definitions(demo PRIVATE "GEN_TARGET_DIR=${DEMO_TITLE_DIR}")
 
-        # CHR art is pulled in with #embed (C23); keep the Clang-only silencer
-        # for parity with the other branches (no-op under ee-g++/GCC).
         target_compile_options(demo PRIVATE $<$<CXX_COMPILER_ID:Clang>:-Wno-c23-extensions>)
 
-        # Enable LTO for release-type configs, mirroring the other branches.
         include(CheckIPOSupported)
         check_ipo_supported(RESULT _ipo_ok OUTPUT _ipo_err)
         if(_ipo_ok)
@@ -3792,51 +1833,6 @@ copied into the .wuhb content tree (mounted at /vol/content).")
             message(STATUS "IPO/LTO not supported by this toolchain: ${_ipo_err}")
         endif()
 
-    # ----------------------------------------------------------------------
-    # Nintendo DS / DSi target (devkitARM + libnds), via the NDS.cmake toolchain.
-    #
-    # Unlike every other emulated-PPU backend (SDL/OGC/CTR/NX/WIIU), the DS does
-    # NOT run the software rasteriser (emu::GenerateFrame). The DS is a 2D tile
-    # console whose hardware is a near-cousin of the NES PPU, so this backend maps
-    # the NES PPU onto the DS's NATIVE 2D hardware (Model B):
-    #   * CHR pattern tables  -> DS character (tile) VRAM (2bpp -> 4bpp expand)
-    #   * nametable+attribute -> DS BG tilemap entries (tile + palette + flip)
-    #   * NES master palette  -> DS BGR555 palette RAM
-    #   * OAM shadow          -> DS hardware OBJ (oamSet)
-    #   * raster band timeline (emu::GenerateBands) -> a per-scanline HBlank scroll
-    #     table, so mid-frame scroll changes and the sprite-0 split still work.
-    # It therefore still pulls in src/emu for the platform-agnostic PPU bookkeeping
-    # (nametable/OAM/palette writes, the band/IRQ timeline, the OAM shadow), but
-    # the per-pixel rasteriser there goes unused.
-    #
-    # The 256x192 panel is 6 tiles shorter than the NES's 240px; the backend shows
-    # a window onto the unaltered 256x240 world (the engine never compromises the
-    # NES game for the DS). Audio: the 4 MB DS has no room for baked PCM, so audio
-    # is stubbed (src/nds/audio.cpp) exactly like the GameCube/Wii backends -- the
-    # user supplies a synthesiser. The DSi build (TARGET_DSI) has 16 MB and may
-    # later embed crunched audio; for now it shares the DS stub path. Only the tiny
-    # CHR art (a few KiB) is embedded.
-    #
-    # The toolchain file (NDS.cmake) is supplied via the nds-*/dsi-* presets; it
-    # sets CMAKE_SYSTEM_NAME=NintendoDS and, through Platform/NintendoDS.cmake, the
-    # ARM9 arch flags and the nds_create_rom() helper used below. libnds is linked
-    # explicitly as -lnds9 (calico's ARM7 + linker script come in via the toolchain).
-    # ----------------------------------------------------------------------
-    # Sony PlayStation 3 target (ps3dev/PSL1GHT), via cmake/PS3.cmake (ps3dev
-    # ships no CMake toolchain of its own -- see that file).
-    #
-    # The compiler for this branch is Clang, not the ppu-g++ that ps3dev
-    # builds: ps3toolchain's PPU GCC is 13.2.0, which has no #embed, and
-    # src/ps3/audio.cpp needs it. cmake/PS3.cmake sets that up and
-    # keeps ppu-g++ as the link driver; docker/Dockerfile.ps3 is what puts both
-    # in one image.
-    #
-    # PSL1GHT's ppu-types.h already typedefs u8/u16/u32/u64/s8/s16/s32/s64, so
-    # the real intsh (whose `using namespace br0::intsh` would make those names
-    # ambiguous unqualified -- breaking PSL1GHT's own headers, not just this
-    # project's) is never fetched here either; src/ps3/intsh_shim/intsh stands
-    # in, exactly as the ps2 branch does for ps2sdk's tamtypes.h. See that
-    # shim's own comment.
     elseif(TARGET_PLATFORM STREQUAL "ps3")
         project(pnes CXX)
 
@@ -3848,14 +1844,6 @@ copied into the .wuhb content tree (mounted at /vol/content).")
         _make_consh_available()
         _fixup_fetched_cxx_std_targets()
 
-        # Reuse the PSP's generated title/options art, NOT the NES's -- for the
-        # identical reason the ps2 branch does (see its own comment): the NES's
-        # demo/gen/*/nes headers #error without SYSMEM/TITLE/TITLE_DATA/
-        # OPTIONS/OPTIONS_DATA, which only describe the real cartridge's
-        # bank-switched ROM layout and mean nothing for a PS3 SELF. The PSP's
-        # generated headers make the same shared video.hpp/text.hpp calls with
-        # no bank placement, and its panel is a superset of this branch's
-        # NES-native 256x240, so the same absolute tile coordinates fit.
         set(DEMO_TITLE_DIR psp)
 
         if(NOT DEFINED ENV{PSL1GHT})
@@ -3866,11 +1854,6 @@ copied into the .wuhb content tree (mounted at /vol/content).")
         set(PS3DEV_ROOT  "$ENV{PS3DEV}")
         set(PSL1GHT_ROOT "$ENV{PSL1GHT}")
 
-        # The PS3 backend presents the shared software PPU (src/emu): the
-        # emulator and all the nametable/OAM/palette write functions are
-        # platform-agnostic and compiled here alongside the RSX-mapped
-        # framebuffer present, the libio pad input, and the libaudio streaming
-        # audio.
         file(GLOB PS3_SOURCES CONFIGURE_DEPENDS src/ps3/*.cpp src/emu/*.cpp src/emu/mappers/*.cpp)
         file(GLOB_RECURSE ALL_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/all/*.cpp)
         add_library(pnes STATIC ${PS3_SOURCES} ${ALL_SOURCES})
@@ -3879,50 +1862,17 @@ copied into the .wuhb content tree (mounted at /vol/content).")
                 ${CMAKE_SOURCE_DIR}/include/umbrella
                 ${PSL1GHT_ROOT}/ppu/include
         )
-        # TARGET_PS3 is the group the engine headers gate on (NES-native 32x30
-        # viewport, no SDL headers -- see video.hpp's own TARGET_PS3 branch).
-        # Unlike the PS2's _EE, PSL1GHT needs no equivalent "this is the PPU"
-        # define: its headers are unconditional.
         target_compile_definitions(pnes PUBLIC TARGET_PS3)
-        # Alternative nametable wiring (see the TARGET_NES branch's own comment,
-        # near the top of this file): a fact about which board a build is
-        # modeling, not something exclusive to the NES target itself.
         if(DEFINED ALTERNATIVE_NAMETABLE)
             target_compile_definitions(pnes PUBLIC "ALTERNATIVE_NAMETABLE=${ALTERNATIVE_NAMETABLE}")
         endif()
-        # Boot tracing: ps3_trace() (src/ps3/internal.hpp) writes one line per
-        # init step straight to lv2's TTY channel 0, in RELEASE as well as
-        # debug -- deliberately not NDEBUG-gated, unlike log(), because the
-        # thing it exists to diagnose is a release build that never reaches a
-        # first frame. Every bail-out in irq::init() and audio::Init() names
-        # itself, so a console that boots to black reports which step failed
-        # instead of leaving it to be guessed at.
-        #
-        # ON while this backend is being brought up on real hardware/RPCS3;
-        # configure with -DPS3_BOOT_TRACE=0 to compile it out to nothing (the
-        # helper becomes an empty inline taking an unused argument). Flip the
-        # default once a first boot is confirmed good.
         set(PS3_BOOT_TRACE 1 CACHE STRING "Trace PS3 init steps to the lv2 TTY (bring-up aid)")
         target_compile_definitions(pnes PUBLIC "PS3_BOOT_TRACE=${PS3_BOOT_TRACE}")
 
         target_link_libraries(pnes PUBLIC br0::intsh br0::tuple br0::consh)
 
-        # src/ps3/audio.cpp #embeds the music asset, so the backend library
-        # needs this silencer too -- not just the demo target the way the other
-        # console branches do it. On those, Clang is never the compiler and the
-        # flag is dead weight kept for parity; here Clang IS the compiler, so
-        # #embed really does warn as a C23 extension in C++ mode.
         target_compile_options(pnes PRIVATE $<$<CXX_COMPILER_ID:Clang>:-Wno-c23-extensions>)
 
-        # Same reasoning as the PSP/PS2 branches: transcode the desktop
-        # pc_audio.wav to a small Vorbis OGG at build time and #embed it
-        # (src/ps3/audio.cpp decodes it with stb_vorbis, streaming from a
-        # dedicated PPU thread).
-        #
-        # 48000, not the 44100 the PSP and PS2 branches encode to: libaudio's
-        # port runs at a fixed 48kHz and takes 32-bit float samples, so encoding
-        # the asset at that rate means the backend neither resamples nor
-        # converts formats. See src/ps3/audio.cpp's file header.
         find_program(FFMPEG ffmpeg REQUIRED)
         FetchContent_Declare(
                 stb
@@ -3947,9 +1897,6 @@ copied into the .wuhb content tree (mounted at /vol/content).")
         add_custom_target(ps3-assets DEPENDS ${PS3_OGG})
         add_dependencies(pnes ps3-assets)
 
-        # Only one --embed-dir is needed here, unlike the ps2 branch's two:
-        # there is no IOP-side module to embed alongside the music, because
-        # libaudio is PPU-side (see src/ps3/audio.cpp's file header).
         set_source_files_properties(${CMAKE_SOURCE_DIR}/src/ps3/audio.cpp
                 PROPERTIES
                     OBJECT_DEPENDS  ${PS3_OGG}
@@ -3962,22 +1909,12 @@ copied into the .wuhb content tree (mounted at /vol/content).")
         file(GLOB DEMO_GAMEOPTIONS_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/demo/gen/gameOptions/${DEMO_TITLE_DIR}/*.cpp")
         list(APPEND DEMO_SOURCES ${DEMO_GAMEOPTIONS_SOURCES})
 
-        # chr_rom.cpp #embeds the packed blob (demo/chr/chr.bin) and emits it as the
-        # cartridge's CHR ROM image. The blob is a blobman output, not a source file,
-        # so declare it explicitly: repacking it must retrigger that compile.
         set_source_files_properties(${CMAKE_SOURCE_DIR}/demo/src/graphics/chr_rom.cpp
                 PROPERTIES OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/demo/chr/chr.bin")
 
         add_executable(demo ${DEMO_SOURCES})
-        # The SELF packing step below wants a bare .elf to pack from, same as
-        # the PSP branch's EBOOT.PBP step and the ps2 branch's raw ELF.
         set_target_properties(demo PROPERTIES SUFFIX ".elf")
         target_link_directories(demo PRIVATE ${PSL1GHT_ROOT}/ppu/lib)
-        # PSL1GHT's conventional link set and order. rsx/gcm_sys are the RSX
-        # context + display-buffer/flip side used by src/ps3/video.cpp; io is
-        # libio (pad); sysutil/sysmodule are the XMB exit callback; audio is
-        # libaudio; lv2 is the syscall layer everything above sits on and has
-        # to come last. m is newlib's libm, which stb_vorbis needs (floor/pow).
         target_link_libraries(demo PRIVATE pnes
                 rsx gcm_sys
                 io
@@ -3986,59 +1923,24 @@ copied into the .wuhb content tree (mounted at /vol/content).")
                 lv2 m
         )
 
-        # See the TARGET_NES branch's own comment on this same call for GEN_TARGET_DIR.
         target_compile_definitions(demo PRIVATE "GEN_TARGET_DIR=${DEMO_TITLE_DIR}")
 
-        # CHR art is pulled in with #embed (C23). Unlike the other console
-        # branches, where this silencer is a no-op kept for parity, Clang IS the
-        # compiler here -- so this is the branch where it actually fires.
         target_compile_options(demo PRIVATE $<$<CXX_COMPILER_ID:Clang>:-Wno-c23-extensions>)
 
-        # Pack the linked ELF into the SELF homebrew image the console actually
-        # boots. Three steps, all ps3dev host tools:
+        # Pack the linked ELF into the SELF image the console boots, all three
+        # ps3dev host tools:
         #
-        #   sprxlinker  rewrites the ELF's PRX import/export stubs IN PLACE.
-        #               PSL1GHT links against stub libraries whose relocations
-        #               are not finished by the linker, so this is not optional
-        #               -- it is what PSL1GHT's own ppu_rules runs immediately
-        #               after its link step. In place, and before the two packs
-        #               below, is also what leaves demo.elf itself bootable:
-        #               RPCS3 loads a bare PPU ELF, which is the one way to
-        #               exercise this backend with the SELF layer taken out of
-        #               the picture entirely.
-        #   fself       wraps the result as EBOOT.BIN, the filename the XMB
-        #               expects inside a homebrew folder's USRDIR.
-        #   make_self   wraps it a second time as EBOOT.CEX.BIN.
+        #   sprxlinker  finishes the PRX import/export relocations the linker
+        #               leaves open. Not optional -- PSL1GHT's own rules run it
+        #               straight after linking -- and doing it in place leaves
+        #               demo.elf itself bootable, which is how RPCS3 can
+        #               exercise this backend with the SELF layer removed.
+        #   fself       wraps it as EBOOT.BIN, which is what the XMB expects.
+        #   make_self   wraps it again as EBOOT.CEX.BIN.
         #
-        # fself is the one EBOOT.BIN is built from, and the difference is not
-        # cosmetic -- it is in the SCE header's key_revision field:
-        #
-        #   fself      5343 4500 0000 0002 8000 0001 ...   segments stored raw
-        #   make_self  5343 4500 0000 0002 0001 0001 ...   segments compressed
-        #
-        # 0x8000 is the agreed "this image is unsigned, read the segments
-        # straight out" marker, and it is what loaders check first. make_self
-        # instead emits a retail-SHAPED image -- real key revision, compressed
-        # segments -- which obliges the loader down its decrypt-with-console-
-        # keys path for a file that was never signed by anything. Neither image
-        # is any more genuinely signed than the other (ps3dev has no private
-        # key), so the retail shape buys nothing and costs the raw-load route.
-        #
-        # PSL1GHT's own ppu_rules emits both for exactly this reason: its %.self
-        # rule runs make_self AND then fself into $(basename $@).fake.self. This
-        # just picks the fake one as the default rather than the extra.
-        # EBOOT.CEX.BIN is kept so nothing that wants the other form has to go
-        # looking for a tool.
-        #
-        # Neither pack strips first, unlike ppu_rules (which does $(STRIP) ->
-        # sprxlinker -> make_self). Keeping the symbols is what lets addr2line
-        # turn an RPCS3 backtrace back into a line of this repo, and make_self
-        # only stores PT_LOAD segments anyway, so the DWARF costs size in the
-        # fself image alone.
-        #
-        # POST_BUILD on the demo target rather than a separate add_custom_target
-        # so that `cmake --build` produces the bootable artifact with no extra
-        # target to remember -- matching how the Wii U branch packs its RPX.
+        # The difference is the SCE header's key_revision: fself writes 0x8000,
+        # the agreed "unsigned, read the segments raw" marker loaders check
+        # first, where make_self compresses them.
         find_program(PS3_SPRXLINKER sprxlinker HINTS ${PS3DEV_ROOT}/bin REQUIRED)
         find_program(PS3_FSELF      fself      HINTS ${PS3DEV_ROOT}/bin REQUIRED)
         find_program(PS3_MAKE_SELF  make_self  HINTS ${PS3DEV_ROOT}/bin REQUIRED)
@@ -4049,21 +1951,6 @@ copied into the .wuhb content tree (mounted at /vol/content).")
                 COMMENT "Packing PS3 SELF: demo.elf -> EBOOT.BIN (sprxlinker + fself) + EBOOT.CEX.BIN (make_self)"
                 VERBATIM)
 
-        # LTO is deliberately NOT enabled here, unlike every other branch.
-        #
-        # This is the one target where Clang compiles and ppu-g++ links (see
-        # cmake/PS3.cmake). -flto makes Clang emit LLVM bitcode rather than
-        # PowerPC objects, and ps3dev's GCC/binutils has no LLVMgold plugin to
-        # read it, so the link would fail on every object. Worse, it would fail
-        # late and confusingly: check_ipo_supported() asks the COMPILER whether
-        # it supports IPO -- Clang says yes -- and cmake/PS3.cmake sets
-        # CMAKE_TRY_COMPILE_TARGET_TYPE to STATIC_LIBRARY, so that probe never
-        # exercises a real link and never sees the problem.
-        #
-        # Revisit only alongside the compiler split itself: either both halves
-        # become Clang (needs lld plus PSL1GHT's linker scripts verified
-        # against it) or both become GCC (needs #embed, i.e. ps3dev on GCC 15 --
-        # see .ignore/ps3-cmake-build-setup/NOTES.md).
 
     elseif(TARGET_PLATFORM STREQUAL "nds" OR TARGET_PLATFORM STREQUAL "dsi")
         project(pnes CXX)
@@ -4072,10 +1959,6 @@ copied into the .wuhb content tree (mounted at /vol/content).")
         _make_consh_available()
         _fixup_fetched_cxx_std_targets()
 
-        # The DS backend maps the shared PPU bookkeeping (src/emu) onto libnds 2D
-        # hardware: the emulator and all the nametable/OAM/palette write functions
-        # are platform-agnostic and compiled here alongside the libnds video/
-        # present, the keypad input, and the (stub) audio.
         file(GLOB NDS_SOURCES CONFIGURE_DEPENDS src/nds/*.cpp src/emu/*.cpp src/emu/mappers/*.cpp)
         file(GLOB_RECURSE ALL_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/all/*.cpp)
         add_library(pnes STATIC ${NDS_SOURCES} ${ALL_SOURCES})
@@ -4083,9 +1966,6 @@ copied into the .wuhb content tree (mounted at /vol/content).")
                 ${CMAKE_SOURCE_DIR}/include
                 ${CMAKE_SOURCE_DIR}/include/umbrella
         )
-        # TARGET_NDS is the group the engine headers gate on (native 2D hardware,
-        # 32x24 viewport, no SDL headers). The DSi build adds TARGET_DSI on top so
-        # the audio path can opt into the larger RAM later.
         target_compile_definitions(pnes PUBLIC TARGET_NDS)
         if(TARGET_PLATFORM STREQUAL "dsi")
             target_compile_definitions(pnes PUBLIC TARGET_DSI)
@@ -4093,9 +1973,6 @@ copied into the .wuhb content tree (mounted at /vol/content).")
         else()
             set(DEMO_TITLE_DIR ds)
         endif()
-        # Alternative nametable wiring (see the TARGET_NES branch's own comment,
-        # near the top of this file): a fact about which board a build is
-        # modeling, not something exclusive to the NES target itself.
         if(DEFINED ALTERNATIVE_NAMETABLE)
             target_compile_definitions(pnes PUBLIC "ALTERNATIVE_NAMETABLE=${ALTERNATIVE_NAMETABLE}")
         endif()
@@ -4108,26 +1985,17 @@ copied into the .wuhb content tree (mounted at /vol/content).")
         file(GLOB DEMO_GAMEOPTIONS_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/demo/gen/gameOptions/${DEMO_TITLE_DIR}/*.cpp")
         list(APPEND DEMO_SOURCES ${DEMO_GAMEOPTIONS_SOURCES})
 
-        # chr_rom.cpp #embeds the packed blob (demo/chr/chr.bin) and emits it as the
-        # cartridge's CHR ROM image. The blob is a blobman output, not a source file,
-        # so declare it explicitly: repacking it must retrigger that compile.
         set_source_files_properties(${CMAKE_SOURCE_DIR}/demo/src/graphics/chr_rom.cpp
                 PROPERTIES OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/demo/chr/chr.bin")
 
-        # `demo` is the packaged .nds ROM, `demo_elf` the linked ARM9 ELF -- see
-        # the note on the 3DS branch's add_executable for why.
         add_executable(demo_elf ${DEMO_SOURCES})
         set_target_properties(demo_elf PROPERTIES OUTPUT_NAME demo SUFFIX ".elf")
         target_link_libraries(demo_elf PRIVATE pnes nds9)
 
-        # See the TARGET_NES branch's own comment on this same call for GEN_TARGET_DIR.
         target_compile_definitions(demo_elf PRIVATE "GEN_TARGET_DIR=${DEMO_TITLE_DIR}")
 
-        # CHR art is pulled in with #embed (C23); keep the Clang-only silencer for
-        # parity with the other branches (no-op under devkitARM's GCC).
         target_compile_options(demo_elf PRIVATE $<$<CXX_COMPILER_ID:Clang>:-Wno-c23-extensions>)
 
-        # Enable LTO for release-type configs, mirroring the other branches.
         include(CheckIPOSupported)
         check_ipo_supported(RESULT _ipo_ok OUTPUT _ipo_err)
         if(_ipo_ok)
@@ -4140,12 +2008,6 @@ copied into the .wuhb content tree (mounted at /vol/content).")
             message(STATUS "IPO/LTO not supported by this toolchain: ${_ipo_err}")
         endif()
 
-        # Wrap the linked ELF as a .nds ROM (the default ARM7 core + libnds icon
-        # come from calico automatically). nds_create_rom() comes from devkitARM's
-        # Platform/NintendoDS.cmake once the NDS toolchain is active. The output is
-        # named demo.nds so it matches the other targets' demo.<ext> convention.
-        # The ROM target is `demo` itself (ARM9 names the ELF); it used to be a
-        # separate `demo_nds`, which left `--target demo` at the bare ELF.
         nds_create_rom(demo
                 ARM9 demo_elf
                 NAME "pnes demo"
@@ -4154,38 +2016,6 @@ copied into the .wuhb content tree (mounted at /vol/content).")
                 OUTPUT ${CMAKE_BINARY_DIR}/demo.nds
         )
 
-    # ----------------------------------------------------------------------
-    # Game Boy Advance target (devkitARM + libgba), via devkitPro's official
-    # GBA.cmake toolchain (the gba-* presets point CMAKE_TOOLCHAIN_FILE at
-    # $DEVKITPRO/cmake/GBA.cmake, exactly like the DS uses NDS.cmake).
-    #
-    # Same family as the DS: the GBA does NOT run the software rasteriser
-    # (emu::GenerateFrame). It is a 2D tile console whose hardware is a near-cousin
-    # of the NES PPU, so this backend maps the NES PPU onto the GBA's NATIVE 2D
-    # hardware (Model B):
-    #   * CHR pattern tables  -> GBA character (tile) VRAM (2bpp -> 4bpp expand)
-    #   * nametable+attribute -> GBA BG tilemap entries (tile + palette + flip)
-    #   * NES master palette  -> GBA BGR555 palette RAM
-    #   * OAM shadow          -> GBA hardware OBJ (OAM written directly)
-    #   * raster band timeline (emu::GenerateBands) -> a per-scanline HBlank scroll
-    #     table, so mid-frame scroll changes and the sprite-0 split still work.
-    # It therefore still pulls in src/emu for the platform-agnostic PPU bookkeeping
-    # (nametable/OAM/palette writes, the band/IRQ timeline, the OAM shadow), but
-    # the per-pixel rasteriser there goes unused.
-    #
-    # The 240x160 panel is the first target NARROWER than the NES (30 vs 32 tiles)
-    # as well as shorter (20 vs 30); the backend shows a window onto the unaltered
-    # 256x240 world (the engine never compromises the NES game for the GBA). Audio:
-    # the GBA's tiny RAM has no room for baked PCM, so audio is stubbed
-    # (src/gba/audio.cpp) exactly like the DS/GameCube/Wii backends -- the user
-    # supplies a synthesiser. Only the tiny CHR art (a few KiB) is embedded.
-    #
-    # The toolchain ($DEVKITPRO/cmake/GBA.cmake) is supplied via the gba-* presets;
-    # it imports devkitARM.cmake and routes CMAKE_SYSTEM_NAME=NintendoGBA to
-    # devkitPro's Platform/NintendoGBA.cmake module, which sets the armv4t flags,
-    # links libgba and provides the gba_create_rom() helper used below (gba.specs
-    # crt0 + cart link script are applied by gba_create_rom itself).
-    # ----------------------------------------------------------------------
     elseif(TARGET_PLATFORM STREQUAL "gba")
         project(pnes CXX)
 
@@ -4195,10 +2025,6 @@ copied into the .wuhb content tree (mounted at /vol/content).")
 
         set(DEMO_TITLE_DIR gba)
 
-        # The GBA backend maps the shared PPU bookkeeping (src/emu) onto libgba 2D
-        # hardware: the emulator and all the nametable/OAM/palette write functions
-        # are platform-agnostic and compiled here alongside the libgba video/
-        # present, the keypad input, and the (stub) audio.
         file(GLOB GBA_SOURCES CONFIGURE_DEPENDS src/gba/*.cpp src/emu/*.cpp src/emu/mappers/*.cpp)
         file(GLOB_RECURSE ALL_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/all/*.cpp)
         add_library(pnes STATIC ${GBA_SOURCES} ${ALL_SOURCES})
@@ -4206,12 +2032,7 @@ copied into the .wuhb content tree (mounted at /vol/content).")
                 ${CMAKE_SOURCE_DIR}/include
                 ${CMAKE_SOURCE_DIR}/include/umbrella
         )
-        # TARGET_GBA is the group the engine headers gate on (native 2D hardware,
-        # 30x20 viewport -- the first target narrower than the NES, no SDL headers).
         target_compile_definitions(pnes PUBLIC TARGET_GBA)
-        # Alternative nametable wiring (see the TARGET_NES branch's own comment,
-        # near the top of this file): a fact about which board a build is
-        # modeling, not something exclusive to the NES target itself.
         if(DEFINED ALTERNATIVE_NAMETABLE)
             target_compile_definitions(pnes PUBLIC "ALTERNATIVE_NAMETABLE=${ALTERNATIVE_NAMETABLE}")
         endif()
@@ -4224,26 +2045,17 @@ copied into the .wuhb content tree (mounted at /vol/content).")
         file(GLOB DEMO_GAMEOPTIONS_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/demo/gen/gameOptions/${DEMO_TITLE_DIR}/*.cpp")
         list(APPEND DEMO_SOURCES ${DEMO_GAMEOPTIONS_SOURCES})
 
-        # chr_rom.cpp #embeds the packed blob (demo/chr/chr.bin) and emits it as the
-        # cartridge's CHR ROM image. The blob is a blobman output, not a source file,
-        # so declare it explicitly: repacking it must retrigger that compile.
         set_source_files_properties(${CMAKE_SOURCE_DIR}/demo/src/graphics/chr_rom.cpp
                 PROPERTIES OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/demo/chr/chr.bin")
 
         add_executable(demo ${DEMO_SOURCES})
         set_target_properties(demo PROPERTIES SUFFIX ".elf")
-        # libgba (-lgba) + gba.specs come in via the platform module's standard
-        # libraries/linker flags, so only the engine archive is linked explicitly.
         target_link_libraries(demo PRIVATE pnes)
 
-        # See the TARGET_NES branch's own comment on this same call for GEN_TARGET_DIR.
         target_compile_definitions(demo PRIVATE "GEN_TARGET_DIR=${DEMO_TITLE_DIR}")
 
-        # CHR art is pulled in with #embed (C23); keep the Clang-only silencer for
-        # parity with the other branches (no-op under devkitARM's GCC).
         target_compile_options(demo PRIVATE $<$<CXX_COMPILER_ID:Clang>:-Wno-c23-extensions>)
 
-        # Enable LTO for release-type configs, mirroring the other branches.
         include(CheckIPOSupported)
         check_ipo_supported(RESULT _ipo_ok OUTPUT _ipo_err)
         if(_ipo_ok)
@@ -4256,11 +2068,6 @@ copied into the .wuhb content tree (mounted at /vol/content).")
             message(STATUS "IPO/LTO not supported by this toolchain: ${_ipo_err}")
         endif()
 
-        # Wrap the linked ELF as a header-fixed .gba ROM. devkitPro's
-        # gba_create_rom() operates on the executable target directly: it adds the
-        # cart link options (-specs=gba.specs) to `demo`, then POST_BUILD runs
-        # objcopy -O binary + gbafix (Nintendo logo checksum/complement + the
-        # title/game/maker codes). Output is named demo.gba to match demo.<ext>.
         gba_create_rom(demo
                 OUTPUT ${CMAKE_BINARY_DIR}/demo.gba
                 TITLE "PNES"
@@ -4268,9 +2075,6 @@ copied into the .wuhb content tree (mounted at /vol/content).")
                 MAKERCODE "00"
         )
 
-    # ----------------------------------------------------------------------
-    # Desktop targets (macOS, Windows, Linux)
-    # ----------------------------------------------------------------------
 else()
     project(pnes CXX)
 
@@ -4290,32 +2094,6 @@ else()
         message(FATAL_ERROR "Set -DTARGET_PLATFORM to one of: nes, win, mac, linux")
     endif()
 
-    # ------------------------------------------------------------------
-    # mac-arm64-* builds ON Apple Silicon hardware -- there is no cross
-    # toolchain wired up for it from an Intel host (unlike win-arm64/
-    # linux-arm64, which both have a real, demonstrated cross path: MSVC's
-    # ARM64 import libs via vcvarsall/CMAKE_C(XX)_COMPILER_TARGET for
-    # Windows, and the aarch64 cross toolchain + multiarch dev packages
-    # baked into docker/Dockerfile.linux for Linux -- see the pkgconfig
-    # check a little further down for the Linux case, and win-x86's total
-    # absence of any such guard for the Windows case). Configuring
-    # mac-arm64 from an IDE profile picker on an Intel Mac would silently
-    # produce a binary the developer can't run or test locally, so refuse
-    # it here.
-    #
-    # This is deliberately narrower than it once was: a previous version of
-    # this check applied to all three arm64 platforms, gating on host CPU
-    # (or /.dockerenv as a Linux-only escape hatch) rather than on whether
-    # a cross toolchain is actually present. That was the wrong signal --
-    # it broke the win-arm64 CI job's genuine vcvarsall-based cross build,
-    # and would equally have broken a Linux dev who installed
-    # gcc-aarch64-linux-gnu natively instead of going through Docker. Each
-    # platform now gets a check that reflects what's actually true for it.
-    #
-    # CMAKE_HOST_SYSTEM_PROCESSOR (not CMAKE_SYSTEM_PROCESSOR, which
-    # reflects the TARGET when cross-compiling) is the real host CPU as
-    # registry-reported -- arm64 on macOS.
-    # ------------------------------------------------------------------
     if(TARGET_PLATFORM STREQUAL "mac" AND CMAKE_OSX_ARCHITECTURES MATCHES "arm64"
             AND NOT CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^(arm64|ARM64)$")
         message(FATAL_ERROR
@@ -4326,51 +2104,13 @@ else()
                 "instead.")
     endif()
 
-    # Alternative nametable wiring (see the TARGET_NES branch's own comment,
-    # above): this is a fact about which board a build is modeling, not
-    # something exclusive to the NES target itself, so the desktop preview
-    # needs the same define to route mmc3.cpp's strong ppu::ReadNametable/
-    # WriteNametable overrides correctly off-NES too -- otherwise
-    # ALTERNATIVE_NAMETABLE reads as 0 in every #if here regardless of what
-    # local.cmake actually sets.
     if(DEFINED ALTERNATIVE_NAMETABLE)
         list(APPEND PLATFORM_DEFINE "ALTERNATIVE_NAMETABLE=${ALTERNATIVE_NAMETABLE}")
     endif()
 
     include(FetchContent)
 
-    # ------------------------------------------------------------------
-    # On Linux, link against the system's SDL3 and libusb-1.0 instead of
-    # vendoring and building our own copies. libusb is LGPL-2.1, which
-    # requires dynamic linking against a distro-swappable library anyway;
-    # SDL3 (zlib license) has no such requirement, but distros commonly
-    # package it now (Arch, Fedora, Debian trixie+, Tumbleweed, Gentoo,
-    # NixOS) and building it from source every time is otherwise pure
-    # waste. Same policy for both: prefer the system package on Linux,
-    # keep vendoring on platforms (Windows/Mac) where one isn't
-    # reliably available.
-    #
-    # NOTE: requires libsdl3-dev + libusb-1.0 and their pkg-config files
-    # installed on the host (libsdl3-dev + libusb-1.0-0-dev on Debian/
-    # Ubuntu trixie+, SDL3-devel + libusbx-devel on Fedora/RHEL). Older
-    # LTS distros (Ubuntu 22.04/24.04, Debian bookworm, RHEL) don't carry
-    # SDL3 yet and need a PPA/backport or a source build override.
-    # ------------------------------------------------------------------
     if(TARGET_PLATFORM STREQUAL "linux")
-        # ------------------------------------------------------------------
-        # 32-bit (i686) builds must resolve pkg-config against the 32-bit
-        # sdl3/libusb-1.0 .pc files, not the native x64 ones -- pkg-config
-        # itself doesn't know or care about target arch, so left alone it
-        # would happily hand back the wrong ELF class and fail at link time.
-        # Distros disagree on where those 32-bit .pc files live (Debian/
-        # Ubuntu's i386 multiarch triplet dir vs Arch/openSUSE's /usr/lib32),
-        # so detect whichever is actually present rather than hardcoding one
-        # -- that hardcoding used to live in CMakePresets.json's
-        # linux-x86-release preset and broke the moment this was tried
-        # natively on Arch (see git history). /usr/share/pkgconfig is always
-        # appended: arch-independent .pc files (e.g. xproto) live there and
-        # are dropped from the search entirely if PKG_CONFIG_LIBDIR omits it.
-        # ------------------------------------------------------------------
         if(CMAKE_CXX_COMPILER_TARGET MATCHES "^i[3-6]86-")
             foreach(_x86_pkgconfig_dir
                     /usr/lib32/pkgconfig
@@ -4390,18 +2130,6 @@ else()
             endif()
         endif()
 
-        # ------------------------------------------------------------------
-        # Same problem, mirrored for cross-compiling TO aarch64 from a
-        # non-arm64 host (the only way linux-arm64-release reaches this
-        # branch at all -- the host-arch guard above only lets that happen
-        # inside a Docker container, e.g. docker/Dockerfile.linux's
-        # crossbuild-essential-arm64 + libsdl3-dev:arm64 install). A NATIVE
-        # arm64 host needs no override: its default pkgconfig search path
-        # already points at its own native .pc files. Debian/Ubuntu's arm64
-        # multiarch triplet dir is the only layout this project's Docker
-        # image uses, so unlike the i686 case above there's just the one
-        # candidate to check.
-        # ------------------------------------------------------------------
         if(CMAKE_CXX_COMPILER_TARGET MATCHES "^aarch64-"
                 AND NOT CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
             if(EXISTS /usr/lib/aarch64-linux-gnu/pkgconfig)
@@ -4426,9 +2154,6 @@ else()
             add_library(LibUSB::LibUSB ALIAS PkgConfig::LibUSB)
         endif()
     else()
-        # ------------------------------------------------------------------
-        # Fetch SDL3 source and build it statically alongside the project.
-        # ------------------------------------------------------------------
         set(SDL3_GIT_TAG "release-3.2.16" CACHE STRING "SDL3 git tag to fetch")
 
         set(SDL_SHARED OFF CACHE BOOL "" FORCE)
@@ -4454,9 +2179,6 @@ else()
         FetchContent_MakeAvailable(SDL3)
     endif()
 
-    # The SDL3 backend presents the shared software PPU (src/emu): the emulator
-    # and all the nametable/OAM/palette write functions are platform-agnostic
-    # and compiled here alongside the SDL-specific window/present/input/audio.
     file(GLOB SDL3_SOURCES CONFIGURE_DEPENDS src/SDL3/*.cpp src/emu/*.cpp src/emu/mappers/*.cpp)
     file(GLOB_RECURSE ALL_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/all/*.cpp)
     add_library(pnes STATIC ${SDL3_SOURCES} ${ALL_SOURCES})
@@ -4468,13 +2190,6 @@ else()
     target_link_libraries(pnes PUBLIC SDL3::SDL3-static)
     target_link_libraries(pnes PUBLIC br0::intsh br0::tuple br0::consh)
 
-    # stb_vorbis, for src/SDL3/audio.cpp's Ogg Vorbis path. SDL3's core decodes
-    # RIFF/WAVE and nothing else (SDL_LoadWAV), so without this the desktop
-    # backend silently loads no .ogg at all -- which is what demo/audio/sfx
-    # ships. Declared here rather than once at the top for the same reason the
-    # gc/wii, wiiu, psp, ps2 and ps3 branches each declare their own: every
-    # branch is self-contained, and only the ones that actually decode Vorbis
-    # pay the fetch. PRIVATE because nothing outside the library includes it.
     FetchContent_Declare(
             stb
             GIT_REPOSITORY https://github.com/nothings/stb.git
@@ -4494,27 +2209,16 @@ else()
     file(GLOB DEMO_GAMEOPTIONS_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/demo/gen/gameOptions/${DEMO_TITLE_DIR}/*.cpp")
     list(APPEND DEMO_SOURCES ${DEMO_GAMEOPTIONS_SOURCES})
 
-    # chr_rom.cpp #embeds the packed blob (demo/chr/chr.bin) and emits it as the
-    # cartridge's CHR ROM image. The blob is a blobman output, not a source file,
-    # so declare it explicitly: repacking it must retrigger that compile.
     set_source_files_properties(${CMAKE_SOURCE_DIR}/demo/src/graphics/chr_rom.cpp
             PROPERTIES OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/demo/chr/chr.bin")
 
     add_executable(demo ${DEMO_SOURCES})
     target_link_libraries(demo PRIVATE pnes)
 
-    # See the TARGET_NES branch's own comment on this same call for GEN_TARGET_DIR.
     target_compile_definitions(demo PRIVATE "GEN_TARGET_DIR=${DEMO_TITLE_DIR}")
 
-    # CHR art is pulled in with #embed (C23), which Clang flags as an extension
-    # in C++ mode. It is the intended mechanism here, so silence the diagnostic.
-    # Clang-only: GCC doesn't know this flag and would emit an "unrecognized
-    # option" note, and its own #embed support doesn't warn here anyway.
     target_compile_options(demo PRIVATE $<$<CXX_COMPILER_ID:Clang>:-Wno-c23-extensions>)
 
-    # Enable LTO for release-type configs on desktop targets. CMake routes
-    # archive/link through gcc-ar/gcc-ranlib (GCC) or lld (Clang) automatically
-    # once INTERPROCEDURAL_OPTIMIZATION is set on the target.
     include(CheckIPOSupported)
     check_ipo_supported(RESULT _ipo_ok OUTPUT _ipo_err)
     if(_ipo_ok)
@@ -4527,8 +2231,6 @@ else()
         message(STATUS "IPO/LTO not supported by this toolchain: ${_ipo_err}")
     endif()
 
-    # Desktop runs the demo from its own directory and loads tracks/ + sfx/ by
-    # relative path, so they are copied next to the executable.
     add_custom_command(TARGET demo POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_directory
             ${CMAKE_SOURCE_DIR}/demo/audio/tracks
@@ -4541,21 +2243,6 @@ else()
             $<TARGET_FILE_DIR:demo>/sfx
     )
 
-    # ------------------------------------------------------------------
-    # Strip the final executable in non-Debug builds. MSVC has no strip
-    # (symbols live in a separate .pdb), so only run when CMAKE_STRIP is
-    # available (GCC/Clang/MinGW toolchains).
-    #
-    # CMAKE_STRIP is whatever host binutils `strip` CMake found -- for the
-    # linux-x86-release cross build that's fine, since x86_64 binutils'
-    # strip/objcopy understands the i386 ELF machine type natively (biarch).
-    # It is NOT fine for linux-arm64-release: the host's strip can't
-    # recognise the aarch64 ELF machine type at all ("Unable to recognise
-    # the format of the input file"), so the cross-arch aarch64-linux-gnu-*
-    # strip from binutils-aarch64-linux-gnu (installed in
-    # docker/Dockerfile.linux alongside the rest of the arm64 cross bits)
-    # is used instead when it's present.
-    # ------------------------------------------------------------------
     set(_PNES_STRIP "${CMAKE_STRIP}")
     if(CMAKE_CXX_COMPILER_TARGET MATCHES "^aarch64-"
             AND NOT CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
@@ -4572,22 +2259,11 @@ else()
         )
     endif()
 
-    # ------------------------------------------------------------------
-    # AppImage packaging (Linux only). Produces a single-file executable
-    # bundling the demo, SDL3's dynamic deps, and the tracks/sfx assets.
-    # Runs on any glibc >= 2.31 distro with no install step.
-    # Build with: cmake --build <dir> --target demo-appimage
-    # ------------------------------------------------------------------
     if(TARGET_PLATFORM STREQUAL "linux")
         find_program(LINUXDEPLOY linuxdeploy)
         if(LINUXDEPLOY)
             set(APPDIR "${CMAKE_BINARY_DIR}/AppDir")
 
-            # The forced-bundle libasound path below is a multiarch triplet
-            # directory, which differs between the linux-release (x64),
-            # linux-x86-release, and linux-arm64-release presets; derive it
-            # from the same compiler target the presets already set, rather
-            # than hardcoding x64.
             if(CMAKE_CXX_COMPILER_TARGET MATCHES "^i[3-6]86-")
                 set(_LINUX_MULTIARCH_TRIPLET "i386-linux-gnu")
             elseif(CMAKE_CXX_COMPILER_TARGET MATCHES "^aarch64-")
@@ -4596,16 +2272,6 @@ else()
                 set(_LINUX_MULTIARCH_TRIPLET "x86_64-linux-gnu")
             endif()
 
-            # linuxdeploy bundles its own x86_64 `strip` inside its AppImage
-            # (it doesn't consult PATH for one), so when cross-packaging for
-            # aarch64 on an x86_64 host it fails with "Unable to recognise
-            # the architecture of the input file" on every ELF it deploys --
-            # the same host/target mismatch _PNES_STRIP works around above,
-            # but linuxdeploy has no equivalent --strip-tool flag to point
-            # at aarch64-linux-gnu-strip instead. It does honour a documented
-            # NO_STRIP env var to skip that step entirely, which is fine
-            # here: the demo executable this AppImage bundles is already
-            # stripped above, and libasound.so.2 doesn't need to be.
             set(_PNES_LINUXDEPLOY_ENV "")
             if(CMAKE_CXX_COMPILER_TARGET MATCHES "^aarch64-"
                     AND NOT CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
@@ -4618,9 +2284,6 @@ else()
                     @ONLY
             )
 
-            # Custom AppRun — switches cwd to usr/bin so the demo finds
-            # its bundled tracks/ and sfx/ via the same relative paths
-            # used for local dev runs.
             file(WRITE "${CMAKE_BINARY_DIR}/AppRun"
 "#!/bin/bash
 HERE=\"$(dirname \"$(readlink -f \"\${0}\")\")\"
@@ -4629,13 +2292,6 @@ cd \"\${HERE}/usr/bin\"
 exec ./demo \"\$@\"
 ")
 
-            # The AppImage bundles binary redistributions of libSDL3.so and
-            # libusb-1.0.so alongside the demo, but both are now linked
-            # against the host's system packages rather than vendored, so
-            # we hold no local copy of either's license text to copy in —
-            # those obligations fall on whoever built the system packages,
-            # not on this build. Only our own LICENSE travels with the
-            # bundle.
             set(_APPDIR_LICENSES "${APPDIR}/usr/share/doc/pnes")
 
             add_custom_target(demo-appimage
@@ -4658,9 +2314,6 @@ exec ./demo \"\$@\"
                             --executable "${APPDIR}/usr/bin/demo"
                             --desktop-file "${CMAKE_BINARY_DIR}/demo.desktop"
                             --icon-file "${CMAKE_SOURCE_DIR}/demo/demo.png"
-                            # Force-bundle libasound: AppImage's default excludelist skips it
-                            # on the assumption every Linux desktop has ALSA, but minimal
-                            # images (e.g., WSL's default Ubuntu) don't.
                             --library /usr/lib/${_LINUX_MULTIARCH_TRIPLET}/libasound.so.2
                             --output appimage
                     WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
@@ -4676,60 +2329,18 @@ exec ./demo \"\$@\"
     endif()
 endif()
 
-# One REGION define for every target, regardless of which TARGET_PLATFORM branch
-# above actually ran (exactly one does, and it's the only one that has created
-# the pnes target by this point) -- as a quoted string, so what lands in the
-# compiler's command line is REGION="US" and what C++ sees after substitution is
-# the literal "US". Validated here rather than at the set() near the top of this
-# file because the gc_ntscj branch above gets to change it after that point;
-# this is the first line that sees the final value. Same shape as the
-# ORIENTATION guard further up.
 if(NOT REGION STREQUAL "US" AND NOT REGION STREQUAL "EU" AND NOT REGION STREQUAL "JP")
     message(FATAL_ERROR
         "REGION must be US, EU or JP, got: \"${REGION}\"")
 endif()
 target_compile_definitions(pnes PUBLIC "REGION=\"${REGION}\"")
 
-# THE SAME VALUE AS A DEFINED/NOT-DEFINED FLAG, because the string above cannot
-# be tested by the preprocessor. REGION reaches C++ as the literal "US", and a
-# string literal is not valid in a #if expression -- `#if REGION == JP` is a
-# hard error on the token, not a comparison that comes out false. So the market
-# is ALSO published the way the platform is: exactly one of REGION_US,
-# REGION_EU and REGION_JP is defined, and the others do not exist.
-#
-# Same model as TARGET_NES / TARGET_GC / TARGET_OGC, and usable the same three
-# ways -- `#ifdef REGION_JP`, `#if REGION_JP`, `#if defined(REGION_JP)` -- since
-# a definition with no value is 1. A build whose REGION is misspelt cannot
-# reach here: the STREQUAL guard above rejects anything but the three markets,
-# which is what keeps "no REGION_* is defined" from being a silent outcome.
-#
-# The string stays, rather than being replaced by this: it is what a title
-# screen or a log line prints, and nothing about that wants an #ifdef.
 target_compile_definitions(pnes PUBLIC "REGION_${REGION}")
 
-# One SAVE_FILE define for every target, for the same reason REGION gets one:
-# the save backends are per-platform, but "does this game use save technology
-# at all" is not, and every backend needs to compile itself away when it
-# doesn't. The NES branch above has already put this in its own
-# PLATFORM_DEFINE (it needs it in the hand-rolled pass-1 flags as well);
-# repeating it here is harmless exactly as it is for REGION, since CMake
-# de-duplicates identical compile definitions on a target.
-#
-# Truthiness-gated, so the define exists only when saving is on -- see the NES
-# branch's own comment for why #ifdef consumers make that the right test.
 if(SAVE_FILE)
     target_compile_definitions(pnes PUBLIC "SAVE_FILE=${SAVE_FILE}")
 endif()
 
-# uitk-generated title.cpp (every target dir under demo/gen/title/) uses
-# charmap_generic but never includes demo/src/graphics/charmaps.hpp itself --
-# force it in ahead of every demo TU instead. Safe project-wide: it's just an
-# inline constexpr object (see its own header comment -- no ODR/LTO cost, and
-# nothing of the charmap itself reaches the ROM).
-#
-# The executable is `demo` on most targets, but `demo_elf` on the ones where
-# `demo` is the packaged deliverable instead (3DS, Switch, Wii U, DS/DSi -- see
-# the note on the 3DS branch's add_executable).
 if(TARGET demo_elf)
     set(DEMO_EXE_TARGET demo_elf)
 else()

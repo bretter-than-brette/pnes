@@ -27,8 +27,6 @@ QString PaletteStore::add(const QString& name) {
     QString wanted = name.trimmed();
     if (wanted.isEmpty()) wanted = "palette";
 
-    // Names are the key metasprites refer to, so a collision is resolved here
-    // rather than left to produce two palettes nothing can tell apart.
     QString unique = wanted;
     for (int suffix = 2; find(unique) != nullptr; ++suffix) {
         unique = QString("%1 %2").arg(wanted).arg(suffix);
@@ -64,8 +62,6 @@ bool PaletteStore::rename(const QString& from, const QString& to) {
 }
 
 void PaletteStore::setColour(const QString& name, const int slot, const std::uint8_t nesIndex) {
-    // Slot 0 is the transparency entry and is not the user's to set, so it is
-    // not addressable here.
     if (slot < 1 || slot > 3) return;
     if (pal::Palette* palette = mutableFind(name)) {
         palette->colours[static_cast<std::size_t>(slot - 1)] = nesIndex;

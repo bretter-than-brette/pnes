@@ -1,76 +1,13 @@
-# Build matrix for pnes: NES ROM + GameCube/Wii .dol + 3DS .3dsx +
-# PlayStation 2 .elf + desktop targets (Linux x64/x86/arm64, macOS arm64/x64,
-# Windows x64/x86/arm64).
+# Build matrix for pnes: NES ROM, GameCube/Wii .dol, 3DS .3dsx, Switch .nro,
+# DS/DSi .nds, PS2/PS3 .elf, PSP EBOOT, Wii U .wuhb, GBA .gba and the desktop
+# targets.
 #
-# Local reproduction:
-#   The `nes`, `gc`, `wii`, `ctr`, `ps2`, `linux-x64` and `linux-x86` jobs are just
-#   `docker compose run` against the images in docker/, so they reproduce
-#   locally byte-for-byte:
+# The container jobs are `docker compose run` against the images in docker/, so
+# they reproduce locally byte-for-byte -- e.g. `docker compose run --rm
+# build-nes` is the `nes` job. `act -j <job>` runs the workflow itself.
 #
-#       docker compose run --rm build-nes      # == the `nes` job
-#       docker compose run --rm build-gc       # == the `gc` job
-#       docker compose run --rm build-wii      # == the `wii` job
-#       docker compose run --rm build-3ds      # == the `ctr` job
-#       docker compose run --rm build-switch   # == the `switch` job
-#       docker compose run --rm build-nds      # == the `nds` job
-#       docker compose run --rm build-dsi      # == the `dsi` job
-#       docker compose run --rm build-ps2      # == the `ps2` job
-#       docker compose run --rm build-linux    # == the `linux-x64` job's compile
-#       PRESET=linux-x86-release docker compose run --rm build-linux  # == the `linux-x86` job's compile
-#       PRESET=linux-arm64-release docker compose run --rm build-linux  # == the `linux-arm64` job's compile
-#
-#   To run the workflow itself locally, use act (https://github.com/nektos/act),
-#   which executes Linux-container jobs against the host Docker daemon:
-#
-#       act -j nes
-#       act -j gc
-#       act -j wii
-#       act -j ctr
-#       act -j switch
-#       act -j nds
-#       act -j dsi
-#       act -j ps2
-#       act -j linux-x64
-#       act -j linux-x86
-#
-#   act cannot emulate GitHub's macOS/Windows runners, so the `mac-arm64`,
-#   `mac-x64`, `win-x64`, `win-x86` and `win-arm64` jobs are GitHub-hosted
-#   only -- there is no local equivalent on a Linux box.
-#
-#   blobman-check (below) gates nothing and publishes nothing: it rebuilds the
-#   CHR blob from demo/chr/config.toml with tools/blobman and diffs the result
-#   against the committed demo/chr/chr.bin and chr.h. A local build repacks
-#   that pair itself (the root CMakeLists.txt runs blobman at configure time),
-#   but committing the result is still manual, so this is what catches the
-#   committed pair drifting away from the manifest or the art under
-#   demo/chr/assets/. Locally:
-#
-#       act -j blobman-check
-#       cd demo/chr && blobman -i config.toml -o chr.bin -l cpp -v
-#
-#   animator-check (below) is the same arrangement for the animation data:
-#   demo/animations/gen/*.hpp (the pattern-byte tables demo/src reads a frame
-#   of animation out of) are committed, and this re-exports them from
-#   demo/animations/animations.anim with tools/animator's headless exporter and
-#   diffs the result. Every platform job re-exports them for itself as part of
-#   its own configure (the animator-export step in the root CMakeLists.txt),
-#   falling back to the committed headers on an image that cannot build the
-#   exporter -- so, as with blobman, what needs catching is the committed
-#   headers drifting away from the project or from the CHR layout they resolve
-#   against. Locally:
-#
-#       act -j animator-check
-#       cmake --build <builddir>   # the headers re-export as part of configure
-#       tools/animator/build/ci/animator-export -i demo/animations/<project>.anim \
-#           -o demo/animations/gen -v
-#
-#   Every platform job needs codegen-check (below), which builds tools/uitk
-#   (needs Qt) and exports demo/gen/<name>/<target>/<name>.hpp|.cpp for every
-#   demo/ui/<name>.uis -- demo/gen/ is gitignored, so every other job downloads codegen-check's
-#   demo-gen artifact instead of regenerating it (or having a committed copy
-#   to fall back to). Reproduce it locally with:
-#
-#       cmake --build <builddir>   # demo/gen/ regenerates as part of configure
+# The macOS and Windows jobs are hosted runners and have no container
+# equivalent.
 name: CI
 
 on:
@@ -80,23 +17,11 @@ on:
   pull_request:
   workflow_dispatch:
 
-# Newer pushes to the same ref cancel in-flight runs.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  # Gates every platform build below: builds tools/uitk (needs Qt) and
-  # exports demo/gen/<name>/<target>/<name>.hpp|.cpp for every demo/ui/<name>.uis,
-  # then publishes the result as the demo-gen artifact every other job downloads. demo/gen/
-  # is gitignored -- there's nothing committed to fall back to and nothing to
-  # diff against -- so this is the only job that ever builds/runs uitk
-  # itself (most of the other jobs' Docker images/runners don't have Qt at
-  # all), and a failed export here (a malformed .uis, say) fails fast before
-  # wasting time on 19 platform builds that would all fail the same way once
-  # they found no demo-gen artifact to download. Reproduce locally with a Qt
-  # install: `cmake --build <builddir>` regenerates demo/gen/ as part of its
-  # own configure step (see CMakeLists.txt).
   codegen-check:
     name: Codegen check (uitk export)
     runs-on: ubuntu-latest
@@ -128,19 +53,6 @@ jobs:
           path: demo/gen
           if-no-files-found: error
 
-  # demo/chr/chr.bin (the cartridge's whole CHR ROM image) and demo/chr/chr.h
-  # (the blob::<entry>::<tile> ids six demo TUs include) are both COMMITTED and
-  # repacked by hand, so nothing in any platform build below regenerates them.
-  # That is exactly why this job exists: a stale pair compiles perfectly well
-  # against tile ids that no longer describe the blob, and every platform job
-  # would go green over it.
-  #
-  # Gates nothing and publishes nothing -- it is a diff, not a producer, so it
-  # does not block the 19 platform builds the way codegen-check has to.
-  #
-  # Runs on the bare runner rather than a container: blobman is host-native
-  # C++20 whose only dependency is toml++, which its own CMakeLists fetches
-  # when the host has no system package (the runners do not).
   blobman-check:
     name: Blobman check (CHR pack)
     runs-on: ubuntu-latest
@@ -152,14 +64,6 @@ jobs:
           cmake -S tools/blobman -B tools/blobman/build/ci -DCMAKE_BUILD_TYPE=Release
           cmake --build tools/blobman/build/ci -j"$(nproc)"
 
-      # -v for the per-entry fill report ("entry: ui filled 832 of 1024
-      # bytes") -- the only visibility into a hunk quietly running out of room,
-      # and the build log is where that belongs.
-      #
-      # Relative paths with demo/chr as the working directory, for two reasons:
-      # the manifest's includes resolve against it, and blobman echoes the -i
-      # path into chr.h's own provenance comment, so an absolute path would
-      # never match the committed header.
       - name: Repack demo/chr/chr.bin + chr.h
         working-directory: demo/chr
         run: ../../tools/blobman/build/ci/blobman -i config.toml -o chr.bin -l cpp -v
@@ -172,24 +76,6 @@ jobs:
             exit 1
           fi
 
-  # demo/animations/gen/*.hpp -- the pattern-byte tables demo/src reads its
-  # animation frames out of -- are COMMITTED, exactly like blobman's pair, and
-  # exported by hand from the designer. Every platform build re-exports them
-  # at configure time (the animator-export step in the root CMakeLists.txt),
-  # but only where the image can build the exporter at all, and committing the
-  # result is manual either way. That is why this job exists: a stale header
-  # compiles perfectly well against pattern bytes that no longer describe the
-  # CHR layout, and the sprite draws as something else entirely on the console
-  # with every platform job green over it.
-  #
-  # Gates nothing and publishes nothing -- a diff, not a producer, so unlike
-  # codegen-check it does not block the platform builds.
-  #
-  # Runs on the bare runner rather than a container, like blobman-check: the
-  # exporter is host-native C++23 whose only dependency is toml++, which the
-  # animator's own CMakeLists fetches when the host has no system package (the
-  # runners do not). ANIMATOR_GUI=OFF keeps Qt out of it -- the export pipeline
-  # is deliberately Qt-free, and the designer itself is not wanted here.
   animator-check:
     name: Animator check (animation export)
     runs-on: ubuntu-latest
@@ -202,10 +88,6 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release -DANIMATOR_GUI=OFF
           cmake --build tools/animator/build/ci --target animator-export -j"$(nproc)"
 
-      # -v here, unlike the configure-time export: this is the log someone
-      # reads when the diff below fails, so it dumps every frame's pattern
-      # bytes and the sheet's own cell warnings alongside the per-header
-      # summary.
       - name: Re-export demo/animations/gen/*.hpp
         run: |
           for project in demo/animations/*.anim; do
@@ -229,17 +111,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # demo/gen/ (uitk's output) is gitignored -- codegen-check is the only
-      # job that builds/runs uitk itself (it needs Qt); every other job just
-      # downloads what it produced instead of installing Qt itself.
       - name: Download generated UI code
         uses: actions/download-artifact@v7
         with:
           name: demo-gen
           path: demo/gen
 
-      # FetchContent (intsh/tuple) + the FamiStudio download land in the build
-      # tree; caching it across runs skips re-cloning and re-measuring.
       - name: Cache build tree
         uses: actions/cache@v5
         with:
@@ -263,9 +140,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # demo/gen/ (uitk's output) is gitignored -- codegen-check is the only
-      # job that builds/runs uitk itself (it needs Qt); every other job just
-      # downloads what it produced instead of installing Qt itself.
       - name: Download generated UI code
         uses: actions/download-artifact@v7
         with:
@@ -295,9 +169,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # demo/gen/ (uitk's output) is gitignored -- codegen-check is the only
-      # job that builds/runs uitk itself (it needs Qt); every other job just
-      # downloads what it produced instead of installing Qt itself.
       - name: Download generated UI code
         uses: actions/download-artifact@v7
         with:
@@ -327,9 +198,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # demo/gen/ (uitk's output) is gitignored -- codegen-check is the only
-      # job that builds/runs uitk itself (it needs Qt); every other job just
-      # downloads what it produced instead of installing Qt itself.
       - name: Download generated UI code
         uses: actions/download-artifact@v7
         with:
@@ -359,9 +227,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # demo/gen/ (uitk's output) is gitignored -- codegen-check is the only
-      # job that builds/runs uitk itself (it needs Qt); every other job just
-      # downloads what it produced instead of installing Qt itself.
       - name: Download generated UI code
         uses: actions/download-artifact@v7
         with:
@@ -391,9 +256,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # demo/gen/ (uitk's output) is gitignored -- codegen-check is the only
-      # job that builds/runs uitk itself (it needs Qt); every other job just
-      # downloads what it produced instead of installing Qt itself.
       - name: Download generated UI code
         uses: actions/download-artifact@v7
         with:
@@ -423,9 +285,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # demo/gen/ (uitk's output) is gitignored -- codegen-check is the only
-      # job that builds/runs uitk itself (it needs Qt); every other job just
-      # downloads what it produced instead of installing Qt itself.
       - name: Download generated UI code
         uses: actions/download-artifact@v7
         with:
@@ -455,9 +314,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # demo/gen/ (uitk's output) is gitignored -- codegen-check is the only
-      # job that builds/runs uitk itself (it needs Qt); every other job just
-      # downloads what it produced instead of installing Qt itself.
       - name: Download generated UI code
         uses: actions/download-artifact@v7
         with:
@@ -471,11 +327,6 @@ jobs:
           key: wiiu-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'docker/Dockerfile.wiiu') }}
           restore-keys: wiiu-
 
-      # Builds the homebrew .rpx/.wuhb AND assembles the installable-title
-      # (demo-wup): the unpacked code/content/meta tree, plus a packed WUP when
-      # the optional WIIU_COMMON_KEY secret is present. The key is copyrighted, so
-      # forks/PRs without the secret simply get the tree (NUSPacker is skipped) --
-      # the build never fails for lack of a key.
       - name: Build demo.rpx + WUP
         env:
           WIIU_COMMON_KEY: ${{ secrets.WII_U_COMMON_KEY }}
@@ -489,9 +340,6 @@ jobs:
             cmake-build-ci-wiiu-release/demo.wuhb
           if-no-files-found: error
 
-      # The installable-title outputs: the unpacked tree (always) and the packed
-      # WUP (only when the common-key secret was set). Don't fail if the WUP is
-      # absent -- the tree alone is a valid artifact users can pack themselves.
       - uses: actions/upload-artifact@v7
         with:
           name: demo-wiiu-wup
@@ -500,15 +348,6 @@ jobs:
             cmake-build-ci-wiiu-release/wup-installable
           if-no-files-found: warn
 
-  # PlayStation 2 (ps2sdk / EE+IOP). Unlike the devkitPro jobs above, the
-  # toolchain comes from the official prebuilt ps2dev/ps2dev image (Alpine) and
-  # the CMake toolchain file is this project's own cmake/PS2.cmake -- ps2dev
-  # ships none. The build also transcodes demo/audio/tracks/pc_audio.wav into
-  # the music asset the ELF #embeds, using ffmpeg plus ps2sdk's own adpenc
-  # (both present in the image), so the produced demo.elf is several MB larger
-  # than the other console artifacts here -- that's the asset, not debug info.
-  # PS2_MUSIC is left at its default (stream, the EE-decoded ADPCM backend);
-  # the spu2 and vorbis backends are reference paths and aren't gated here.
   ps2:
     name: PlayStation 2 (.elf)
     needs: codegen-check
@@ -516,9 +355,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # demo/gen/ (uitk's output) is gitignored -- codegen-check is the only
-      # job that builds/runs uitk itself (it needs Qt); every other job just
-      # downloads what it produced instead of installing Qt itself.
       - name: Download generated UI code
         uses: actions/download-artifact@v7
         with:
@@ -548,9 +384,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # demo/gen/ (uitk's output) is gitignored -- codegen-check is the only
-      # job that builds/runs uitk itself (it needs Qt); every other job just
-      # downloads what it produced instead of installing Qt itself.
       - name: Download generated UI code
         uses: actions/download-artifact@v7
         with:
@@ -564,8 +397,6 @@ jobs:
           key: linux-x64-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'docker/Dockerfile.linux') }}
           restore-keys: linux-x64-
 
-      # Override the service command to drive the demo-appimage target (which
-      # depends on demo), inside the same image the local `build-linux` uses.
       - name: Build AppImage
         run: |
           docker compose run --rm --build build-linux bash -c '
@@ -587,9 +418,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # demo/gen/ (uitk's output) is gitignored -- codegen-check is the only
-      # job that builds/runs uitk itself (it needs Qt); every other job just
-      # downloads what it produced instead of installing Qt itself.
       - name: Download generated UI code
         uses: actions/download-artifact@v7
         with:
@@ -603,13 +431,6 @@ jobs:
           key: linux-x86-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'docker/Dockerfile.linux') }}
           restore-keys: linux-x86-
 
-      # Same image as linux-x64 -- docker/Dockerfile.linux also installs the
-      # i386 multiarch SDL3/libusb/ALSA -dev packages and g++-multilib, so the
-      # linux-x86-release preset (i686-linux-gnu compiler target) builds and
-      # packages a real 32-bit AppImage here. CMakeLists.txt auto-detects the
-      # right PKG_CONFIG_LIBDIR for whichever 32-bit pkgconfig layout is
-      # present (this image's Debian i386 multiarch dir, or Arch/openSUSE's
-      # /usr/lib32 for local native builds) -- no hardcoded env var needed.
       - name: Build AppImage
         run: |
           docker compose run --rm --build build-linux bash -c '
@@ -631,9 +452,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # demo/gen/ (uitk's output) is gitignored -- codegen-check is the only
-      # job that builds/runs uitk itself (it needs Qt); every other job just
-      # downloads what it produced instead of installing Qt itself.
       - name: Download generated UI code
         uses: actions/download-artifact@v7
         with:
@@ -647,12 +465,6 @@ jobs:
           key: linux-arm64-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'docker/Dockerfile.linux') }}
           restore-keys: linux-arm64-
 
-      # Same image as linux-x64/linux-x86 -- docker/Dockerfile.linux also
-      # installs the arm64 multiarch SDL3/libusb/ALSA -dev packages and
-      # crossbuild-essential-arm64, so the linux-arm64-release preset
-      # (aarch64-linux-gnu compiler target) genuinely cross-compiles here:
-      # this runner is amd64, and CMakeLists.txt finds those packages via
-      # PKG_CONFIG_LIBDIR regardless of host arch.
       - name: Build AppImage
         run: |
           docker compose run --rm --build build-linux bash -c '
@@ -674,9 +486,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # demo/gen/ (uitk's output) is gitignored -- codegen-check is the only
-      # job that builds/runs uitk itself (it needs Qt); every other job just
-      # downloads what it produced instead of installing Qt itself.
       - name: Download generated UI code
         uses: actions/download-artifact@v7
         with:
@@ -714,9 +523,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # demo/gen/ (uitk's output) is gitignored -- codegen-check is the only
-      # job that builds/runs uitk itself (it needs Qt); every other job just
-      # downloads what it produced instead of installing Qt itself.
       - name: Download generated UI code
         uses: actions/download-artifact@v7
         with:
@@ -754,41 +560,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # demo/gen/ (uitk's output) is gitignored -- codegen-check is the only
-      # job that builds/runs uitk itself (it needs Qt); every other job just
-      # downloads what it produced instead of installing Qt itself.
       - name: Download generated UI code
         uses: actions/download-artifact@v7
         with:
           name: demo-gen
           path: demo/gen
 
-      # Set up the MSVC developer environment: provides the Windows SDK headers/
-      # libs and puts Visual Studio's bundled Ninja on PATH. clang (preinstalled
-      # on the runner) then targets the MSVC ABI while still accepting the GNU
-      # compound-literal / gnu++23 extensions the engine relies on -- which cl
-      # would reject.
       - name: Set up MSVC environment
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
 
-      # MSVC 14.52's STL -- Visual Studio 18, which the windows-latest image
-      # now ships -- static_asserts that clang is at least 22 (error STL1000,
-      # yvals_core.h): the headers are only validated against that floor. The
-      # image's preinstalled LLVM is older, so every STL-including translation
-      # unit fails, while SDL3 builds straight past it because SDL is C and
-      # never includes yvals_core.h. Raise clang to meet the floor rather than
-      # defining _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH past it: suppressing
-      # the assert buys an unvalidated pairing, and this codebase leans on
-      # gnu++23 and C23 #embed, exactly where that pairing matters.
-      #
-      # choco upgrades the standalone LLVM in place, so the install prefix
-      # stays C:\Program Files\LLVM and the configure step below can name
-      # clang by absolute path. That is also why it does not pass a bare
-      # `clang`: vcvarsall puts VS's own (older) bundled clang on PATH, and
-      # which one wins differs per arch -- that is why win-arm64 hit STL1000
-      # first. An absolute path makes all three jobs provably use this clang.
       - name: Upgrade LLVM to meet the MSVC STL's clang floor
         shell: cmd
         run: choco upgrade llvm -y --no-progress
@@ -823,27 +605,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # demo/gen/ (uitk's output) is gitignored -- codegen-check is the only
-      # job that builds/runs uitk itself (it needs Qt); every other job just
-      # downloads what it produced instead of installing Qt itself.
       - name: Download generated UI code
         uses: actions/download-artifact@v7
         with:
           name: demo-gen
           path: demo/gen
 
-      # Same MSVC-environment/clang setup as win-x64, but arch: x86 puts the
-      # 32-bit link.exe and Windows SDK import libs on PATH instead. Clang
-      # itself still needs CMAKE_C(XX)_COMPILER_TARGET (set by the
-      # win-x86-release preset) to stop targeting the runner's native
-      # x86_64 -- vcvarsall alone doesn't change clang's default target.
       - name: Set up MSVC environment
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x86
 
-      # Same LLVM upgrade as win-x64 (see its comment for why the MSVC STL
-      # requires it and why clang is named by absolute path below).
       - name: Upgrade LLVM to meet the MSVC STL's clang floor
         shell: cmd
         run: choco upgrade llvm -y --no-progress
@@ -878,28 +650,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # demo/gen/ (uitk's output) is gitignored -- codegen-check is the only
-      # job that builds/runs uitk itself (it needs Qt); every other job just
-      # downloads what it produced instead of installing Qt itself.
       - name: Download generated UI code
         uses: actions/download-artifact@v7
         with:
           name: demo-gen
           path: demo/gen
 
-      # Same MSVC-environment/clang setup as win-x64, but arch: arm64 puts
-      # the ARM64 link.exe and Windows SDK import libs on PATH instead --
-      # windows-latest is an x64 runner, so this is a host=x64/target=arm64
-      # cross environment. Clang itself still needs CMAKE_C(XX)_COMPILER_TARGET
-      # (set by the win-arm64-release preset) to stop targeting the runner's
-      # native x86_64 -- vcvarsall alone doesn't change clang's default target.
       - name: Set up MSVC environment
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: arm64
 
-      # Same LLVM upgrade as win-x64 (see its comment for why the MSVC STL
-      # requires it and why clang is named by absolute path below).
       - name: Upgrade LLVM to meet the MSVC STL's clang floor
         shell: cmd
         run: choco upgrade llvm -y --no-progress

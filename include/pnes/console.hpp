@@ -1,27 +1,12 @@
 /**
  * @file console.hpp
- * @brief Debug-build-only: makes sure PC stdout output (log(), see
- *        logger.hpp) is actually visible, even when the game was launched
- *        by something that never attached a terminal (a file manager, a
- *        desktop launcher, etc.) -- see this project's design notes on why
- *        that happens on Linux (no OS-level GUI/console subsystem split the
- *        way Windows has; a "terminal" is just whatever's on the other end
- *        of fd 1, and most GUI launchers don't attach one at all).
+ * @brief Debug builds only: makes sure PC stdout (log()) is visible even when the
+ *        game was launched by something that attached no terminal.
  *
- * ::tech::EnsureConsoleOnce() is a no-op in a release build (NDEBUG
- * defined) and a no-op if stdout is already a terminal. Otherwise:
- *
- * - Windows: AllocConsole() -- a genuine OS API for exactly this, tied to
- *   the process's own lifetime. Simple and reliable.
- * - Linux/macOS: there is no equivalent API. The only way to get a visible
- *   window is to launch an actual terminal EMULATOR PROGRAM and connect it
- *   to a FIFO this process then redirects its own stdout/stderr into.
- *   Inherently more fragile than the Windows path: it needs a running GUI
- *   session (silently does nothing over SSH/headless/no session), and on
- *   Linux specifically there's no single guaranteed-installed terminal
- *   emulator, so a short list of common ones is tried in turn. Failure to
- *   find one is not an error -- it just means no console appears, same as
- *   before this ran.
+ * Windows has AllocConsole() for exactly this. Linux/macOS have no equivalent,
+ * so a terminal emulator is spawned on a FIFO this process redirects into --
+ * which needs a GUI session, and on Linux a short list of emulators tried in
+ * turn. Finding none is not an error.
  */
 #pragma once
 
@@ -29,15 +14,9 @@
 
 #include <cstdio>
 
-// Every #include lives HERE, before any namespace opens -- never inside one.
-// A header that reopens `namespace std { ... }` while lexically nested
-// inside `namespace tech { ... }` doesn't reach the real ::std at all; it
-// creates a separate, bogus `tech::std` containing whatever that header
-// declared. Confirmed the hard way: an earlier version of this file
-// #included <cstdlib>/<string>/etc. from inside `namespace tech`, and
-// std::string/std::setvbuf inside it resolved to that broken tech::std
-// instead of ::std, both in this project's own build and when compiled
-// standalone against a plain libstdc++.
+// Every #include lives before any namespace opens: a header that reopens
+// `namespace std` while nested inside `namespace tech` creates a bogus tech::std
+// instead. Confirmed the hard way.
 #if defined(_WIN32)
 #include <io.h>
 #include <windows.h>
@@ -63,8 +42,6 @@ inline bool StdoutIsTerminal() {
 
 inline void PlatformEnsureConsole() {
     if (!AllocConsole()) return; // e.g. a console is already attached
-    // Plain freopen, not freopen_s: this needs to build under both MSVC and
-    // MinGW, and freopen is the one form both actually have.
 #if defined(_MSC_VER)
 #pragma warning(push)
 #pragma warning(disable : 4996) // "freopen may be unsafe" -- no user input involved
@@ -76,8 +53,6 @@ inline void PlatformEnsureConsole() {
 #endif
 }
 
-/// Blocks for exactly one keypress -- no Enter required. _getch() reads
-/// directly from the console input buffer, bypassing normal line buffering.
 inline void WaitForKeypress() {
     _getch();
 }
@@ -88,34 +63,16 @@ inline bool StdoutIsTerminal() {
     return isatty(STDOUT_FILENO) != 0;
 }
 
-/**
- * @brief Spawns a terminal emulator running `tail -f -n +1 <fifoPath>`.
- *
- * Tries a short list of common Linux terminal emulators in turn (the first
- * one posix_spawnp can actually find on PATH wins); on macOS, asks
- * Terminal.app via `open -a Terminal` instead, since there's no comparably
- * universal terminal-emulator binary to spawn directly there.
- *
- * @return true if a terminal was successfully spawned (a reader for
- *         fifoPath now exists or will shortly), false if none could be
- *         started -- not an error, just means no console will appear.
- */
 inline bool SpawnTerminalReading(const std::string &fifoPath) {
     const std::string tailCmd = "tail -f -n +1 " + fifoPath;
 
 #if defined(TARGET_MAC)
-    // Terminal.app via Launch Services -- there's no single "the" terminal
-    // binary on macOS the way xterm/etc. serve that role on Linux.
     pid_t pid = -1;
     const char *argv[] = { "open", "-a", "Terminal", "-n", "--args",
                             "sh", "-c", tailCmd.c_str(), nullptr };
     return posix_spawnp(&pid, "open", nullptr, nullptr,
                          const_cast<char *const *>(argv), environ) == 0;
 #else
-    // No single guaranteed-installed terminal emulator on Linux -- try a
-    // handful of common ones. "-e" is the one flag most of them share for
-    // "run this command inside me"; not universal (gnome-terminal's own CLI
-    // has changed shape across versions), but covers the common case.
     static const char *kCandidates[] = {
         "x-terminal-emulator", // Debian/Ubuntu's configured default, if any
         "xterm", "konsole", "gnome-terminal", "xfce4-terminal",
@@ -146,22 +103,9 @@ inline void PlatformEnsureConsole() {
         return; // no terminal emulator found (or no GUI session) -- give up quietly
     }
 
-    // O_RDWR, not O_WRONLY: opening a FIFO write-only blocks until a reader
-    // attaches, which would stall game startup for however long the
-    // terminal emulator takes to launch. Opening read-write never blocks
-    // (POSIX-guaranteed), and the kernel buffers writes until the spawned
-    // terminal's `tail -f` opens its own end a moment later -- no data lost.
-    //
-    // path is DELIBERATELY NOT unlinked here, or ever, by this process --
-    // confirmed the hard way: unlinking right after OUR OWN open() succeeds
-    // races the spawned terminal, which needs a moment to actually launch
-    // and run `tail -f <path>`. If our unlink wins that race, tail's own
-    // later open() gets ENOENT, so it exits immediately (silently -- no
-    // error, kitty's window just closes), and nothing anyone ever reads
-    // from our fd's writes again. Leaving the FIFO in place costs nothing
-    // (a few bytes in /tmp, reclaimed on reboot like any other /tmp file);
-    // it isn't worth chasing a "definitely already opened" signal to clean
-    // up automatically.
+    // O_RDWR, not O_WRONLY, which would block until a reader attached. The FIFO
+    // is never unlinked: unlinking after our own open() races the terminal's
+    // `tail -f`, whose open() then gets ENOENT and exits silently.
     const int rw = open(path, O_RDWR);
     if (rw < 0) return;
 
@@ -169,23 +113,14 @@ inline void PlatformEnsureConsole() {
     dup2(rw, STDERR_FILENO);
     if (rw > STDERR_FILENO) close(rw);
 
-    // stdio decided stdout's buffering mode at startup based on the ORIGINAL
-    // fd 1 (not a terminal), so it defaulted to fully-buffered -- output
-    // would otherwise sit in that buffer indefinitely instead of showing up
-    // promptly in the new console.
+    // stdio chose fully-buffered at startup from the original fd 1, so output
+    // would otherwise sit there instead of appearing in the new console.
     std::setvbuf(stdout, nullptr, _IOLBF, 0);
 }
 
-/**
- * @brief Blocks for exactly one keypress -- no Enter required.
- *
- * Puts the terminal into raw mode (no line buffering, no local echo) for
- * the duration of a single blocking read(), then restores whatever mode it
- * found. If stdin isn't a real terminal at all (tcgetattr fails -- e.g. the
- * process was launched with stdin piped from somewhere, or closed), there's
- * no raw mode to enter, so this just blocks on a single byte from whatever
- * stdin actually is.
- */
+/// Raw mode for one blocking read, then whatever mode it found is restored. If
+/// stdin is not a terminal there is no raw mode to enter, so this just blocks on
+/// a byte from whatever stdin actually is.
 inline void WaitForKeypress() {
     termios oldAttrs{};
     if (tcgetattr(STDIN_FILENO, &oldAttrs) != 0) {
@@ -205,9 +140,6 @@ inline void WaitForKeypress() {
 
 #endif // POSIX
 
-/// Ensures stdout/stderr are visible somewhere: a no-op in release builds,
-/// a no-op if stdout is already a terminal, otherwise creates one (see this
-/// file's own header comment). Safe to call repeatedly -- only acts once.
 inline void EnsureConsoleOnce() {
     static bool done = false;
     if (done) return;
@@ -221,7 +153,6 @@ inline void EnsureConsoleOnce() {
 #else
 
 namespace tech {
-/// Release build, or a platform this doesn't apply to: fully inert.
 inline void EnsureConsoleOnce() {}
 inline void WaitForKeypress() {}
 } // namespace tech

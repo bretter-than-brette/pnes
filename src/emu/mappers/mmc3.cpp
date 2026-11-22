@@ -1,30 +1,9 @@
 /**
  * @file mmc3.cpp
- * @brief Emu-side (off-NES) MMC3 register storage, CHR bank bookkeeping, and
- *        tile-address translation. Counterpart to src/nes/mappers/mmc3.cpp,
- *        which owns the real $8000/$8001-port-pair hardware writes and is
- *        only built for the NES target -- see mmc3.hpp's own file comment.
- *
- * window1Control/window2Control/chr0Control-chr5Control are declared
- * unconditionally in mmc3.hpp (game code calls ::mmc3::SwitchBank /
- * ::mmc3::SwitchCHRBank on them the same way on every target), so they need
- * a definition on EVERY target, not just NES -- ::Register itself already
- * branches its hardware-poke path on TARGET_NES internally.
- *
- * Real NES hardware performs CHR bank switching in silicon: the PPU's own
- * address bus is what MMC3 intercepts, so nothing in software needs to
- * translate a tile address there. Off-NES, the emu PPU (src/emu/ppu.cpp)
- * instead renders straight from one flat, non-bank-switched CHR-ROM image
- * (::patternTable) -- the rest of this file is the software stand-in for
- * what the cartridge's mapper would otherwise be doing: it tracks which
- * physical CHR bank is currently switched into each of MMC3's six windows,
- * and answers "what's the real offset for this PPU-space tile address" via
- * ::GetTileLMA. This file also supplies the strong (non-weak) definition of
- * ::ppu::ResolveTile the emu PPU calls unconditionally for every tile fetch
- * -- see that function's own doc comment (video.hpp) for why this always
- * wins over the emu PPU's own weak default with no runtime dispatch, and
- * ALTERNATIVE_NAMETABLE == 1 (four-screen)'s own comment below for the
- * matching ::ppu::nametableCount override.
+ * @brief The emu-side half of MMC3: the strong ppu::ResolveTile override that
+ *        resolves a tile through the current CHR banks, the scanline IRQ
+ *        scheduled by pixel position rather than A12 edges, and the
+ *        four-screen nametable count.
  */
 #include <pnes/mappers/mmc3.hpp>
 #include <pnes/video.hpp>
@@ -42,12 +21,6 @@ mmc3::Register<3> mmc3::chr3Control;
 mmc3::Register<4> mmc3::chr4Control;
 mmc3::Register<5> mmc3::chr5Control;
 
-// D7 = 0 at boot: the chip's own power-on arrangement, and a placeholder
-// rather than a claim -- nothing has defined the mode until a bank write
-// does, which ::NotifyModeWrite then records. Deliberately NOT seeded from
-// ::mmc3::kChrMode: that is only the default a CALL takes when it does not
-// name one, and pre-agreeing with it here would mask a build whose first
-// bank write never happens.
 bool mmc3::shape = true;
 u8   mmc3::banks[6] = {};
 
@@ -68,27 +41,15 @@ void mmc3::SetMirroring(const bool horizontal) {
     mirroring = horizontal;
 }
 
-/**
- * @brief Off-NES stand-in for the real $C000/$C001/$E001 MMC3 IRQ-arming
- * sequence: there's no scanline-counter hardware to poke, so this just arms
- * the shared single-slot ::irq::irqPending mechanism with the application's
- * fixed ::IRQ entry point (::irq_vector) at @p position -- the same handler
- * the real hardware IRQ vector would reach, only the position varies.
- * Matches ::video::WaitThenReactToSpriteZero's shape, but always targets
- * ::irq_vector rather than a caller-supplied callback, since a real
- * interrupt source has exactly one destination, chosen at compile time --
- * never a runtime-supplied function pointer.
- *
- * @p scanline plays no part in this -- see this function's own doc comment
- * (mmc3.hpp) for why it's specifically NOT reused to derive @p position.
- */
+// Off-NES there is no A12 edge to count, so the split is scheduled at the pixel
+// position the caller actually meant -- see mmc3.hpp on why @p position is not
+// derived from @p scanline.
 void mmc3::ScheduleScanlineIRQ(const u8, const vec2<u16> position) {
     irq::irqHandler      = irq_vector;
     irq::irqPosition     = position;
     irq::irqPendingValid = true;
 }
 
-/** @brief Off-NES stand-in for the real $E000 disable+acknowledge write. */
 void mmc3::AcknowledgeScanlineIRQ() {
     irq::irqPendingValid = false;
 }
@@ -96,54 +57,17 @@ void mmc3::AcknowledgeScanlineIRQ() {
 /**
  * @brief Resolves @p tileVMA through the currently-selected CHR banks.
  *
- * Both arrangements are live here, selected by ::shape, which tracks the D7
- * of whatever was last written to $8000 (::NotifyModeWrite) -- the A12
- * inversion is a real, switchable mechanic off-NES, not a fixed build
- * setting, so a game that banks under one ::mmc3::chrMode in one scene and
- * the other in the next resolves correctly in both.
+ * Both arrangements are live, selected by ::shape, which tracks D7 of the last
+ * $8000 write -- the A12 inversion is a real switchable mechanic off-NES, not a
+ * build setting, so a game that banks under one chrMode in one scene and the
+ * other in the next resolves correctly in both.
  *
- * Mode 1, D7 = 1, ::shape false (::mmc3::chrMode::fineFirst):
- *
- *   $0000-$03FF  R2 (1 KiB)   $1000-$17FF  R0 (2 KiB)
- *   $0400-$07FF  R3 (1 KiB)   $1800-$1FFF  R1 (2 KiB)
- *   $0800-$0BFF  R4 (1 KiB)
- *   $0C00-$0FFF  R5 (1 KiB)
- *
- * Mode 0, D7 = 0, ::shape true (::mmc3::chrMode::coarseFirst), the chip's
- * own power-on arrangement and this file's boot value -- the two halves
- * swapped:
- *
- *   $0000-$07FF  R0 (2 KiB)   $1000-$13FF  R2 (1 KiB)
- *   $0800-$0FFF  R1 (2 KiB)   $1400-$17FF  R3 (1 KiB)
- *                             $1800-$1BFF  R4 (1 KiB)
- *                             $1C00-$1FFF  R5 (1 KiB)
- *
- * Bank numbers are ALL in 1 KiB units, including R0/R1: real MMC3 silicon
- * counts every CHR bank register in 1 KiB units regardless of how wide the
- * window it controls is, and R0/R1 (2 KiB windows) simply ignore the bottom
- * bit of the value written to them -- the register can only ever latch an
- * even 1 KiB-granularity bank, which is what makes a 2 KiB-aligned window
- * out of it (see mmc3.hpp's own comment on ::SwitchCHRBank; confirmed
- * against nesdev.org/wiki/MMC3: "R0 and R1 ignore the bottom bit, as the
- * value written still counts banks in 1KB units but odd numbered banks
- * can't be selected"). So the physical offset is `(bank & ~1) * 1 KiB`,
- * for every register including R0/R1 -- NOT `bank * 2 KiB` -- plus @p
- * tileVMA's offset within that window.
- *
- * The result is wrapped modulo ::ppu::chrRomBytes: a bank register can be
- * (and, in practice, is) written with a value that addresses past what this
- * build actually embeds -- e.g. a board whose real CHR-ROM chip is bigger
- * than the CHR art currently linked into a desktop preview build. Real
- * hardware doesn't fault on that; the chip's own address pins are wired to
- * only as many bits as its actual capacity needs, so a too-large address
- * simply aliases back into the chip's real range. This mirrors that in
- * software, rather than indexing ::patternTable (::CHR_ROM) out of bounds.
+ *   fineFirst (D7=1): $0000-$0FFF is R2-R5 (1 KiB), $1000-$1FFF R0/R1 (2 KiB)
+ *   coarseFirst (D7=0): the two halves swapped -- the chip's power-on state
  */
 u32 mmc3::GetTileLMA(const u16 tileVMA) {
     constexpr u32 k1K = 0x400;
     const u16 vma = tileVMA & 0x1FFF;
-    // R0/R1 only: the register latches an even bank number -- see this
-    // function's own doc comment.
     const u8 bank0 = banks[0] & ~1u;
     const u8 bank1 = banks[1] & ~1u;
     u32 lma;
@@ -167,32 +91,13 @@ u32 mmc3::GetTileLMA(const u16 tileVMA) {
     return lma % ppu::chrRomBytes;
 }
 
-/**
- * @brief Strong ::ppu::ResolveTile override -- see that function's own doc
- * comment (video.hpp) for the weak/strong relationship. Applies to every
- * MMC3 board, four-screen or not: CHR bank switching is independent of
- * nametable wiring.
- */
 u32 ppu::ResolveTile(const u16 tileVMA) {
     return mmc3::GetTileLMA(tileVMA);
 }
 
 #if ALTERNATIVE_NAMETABLE == 1
-/**
- * @brief Four-screen nametable count -- a real extra 2 KiB cartridge VRAM
- * chip, giving 4 genuinely distinct physical nametables with no mirroring
- * aliasing at all (mmc3.hpp's own comment on ALTERNATIVE_NAMETABLE), only
- * compiled in when this board build carries that chip. A board built without
- * it never defines this symbol, so the emu PPU's weak default
- * (::ppu::nametableCount == 2) stands unchanged -- correct for MMC3's
- * ordinary runtime H/V mirroring switch (::SetMirroring), ::emu::
- * ComputeNtGeometry (src/emu/emu.hpp) grids either shape from the same
- * ::VideoRAM allocation, so nothing else needs to special-case this board:
- * ::video::vram_bytes() already sizes ::VideoRAM for all 4 pages, and the
- * weak ::ppu::ReadNametable/::WriteNametable/::Flush defaults already walk
- * whichever count is linked in. A real four-screen board's $A000 write is
- * simply meaningless against this (each quadrant already has fixed,
- * dedicated storage), so ::SetMirroring needs no special-casing either.
- */
+// Four, because ALTERNATIVE_NAMETABLE selects the four-screen wiring: a real
+// extra cartridge VRAM chip, so each quadrant has dedicated storage and the
+// mirroring bit plays no part.
 extern const u8 ppu::nametableCount = 4;
 #endif

@@ -1,30 +1,11 @@
 #!/usr/bin/env bash
 #
-# Workhorse build script. Configures (via CMake preset) and builds one target.
+# Workhorse build script: configures via a CMake preset and builds one target.
 #
-# Usage:
 #   demo/scripts/build.sh <target> [release|debug] [options]
 #
-#   <target>        nes |
-#                   linux | linux-x86 | linux-arm64 | linux-docker |
-#                   win | win-x86 | win-arm64 |
-#                   mac | mac-x64 |
-#                   ctr | gc | wii | switch | wiiu | nds | dsi | ps2
-#   [release|debug] build type (default: release)
-#
-#   'win' is an alias for win-x64, 'mac' for mac-arm64, 'linux' is x64.
-#   PS3, GBA and PSP are not supported by this demo.
-#
-# Options:
-#   -c, --clean     remove the build directory before configuring
-#   -t, --target T  build only the named CMake target (e.g. demo, demo-appimage)
-#   -j, --jobs N    parallel build jobs (default: all cores)
-#   -h, --help      show this help
-#
-# The thin wrappers (build-nes.sh, build-linux.sh, ...) just call this.
 set -euo pipefail
 
-# Repo root is two levels up now that the scripts live under demo/scripts/.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 usage() { sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }

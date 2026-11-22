@@ -17,11 +17,8 @@
 
 namespace {
 
-/// Master-palette layout, as every NES tool draws it: 16 columns of 4 rows,
-/// so a column is one hue and a row one brightness.
 constexpr int kPickerColumns = 16;
 
-/// Swatch size, big enough to judge a colour and to hit with a pointer.
 constexpr int kSwatchPx = 24;
 
 QString swatchStyle(const std::uint32_t rgb) {
@@ -29,18 +26,10 @@ QString swatchStyle(const std::uint32_t rgb) {
         .arg(rgb, 6, 16, QChar('0'));
 }
 
-/// Hex label for a NES colour index, as the hardware numbers it.
 QString colourLabel(const std::uint8_t index) {
     return QString("$%1").arg(index, 2, 16, QChar('0')).toUpper();
 }
 
-/**
- * @brief Modal picker over the NES master palette.
- *
- * The console's 64 colours are the whole choice there is, so this is a grid of
- * them rather than a general colour dialog -- an arbitrary RGB value is not
- * something a palette could hold.
- */
 class NesColourDialog final : public QDialog {
 public:
     explicit NesColourDialog(const std::uint8_t current, QWidget* parent)
@@ -82,8 +71,6 @@ private:
 PaletteWindow::PaletteWindow(PaletteStore* store, QWidget* parent)
     : QDialog(parent), store_(store) {
     setWindowTitle("Palettes");
-    // Non-modal: the point of a separate window is being able to recolour while
-    // looking at the tiles it recolours.
     setModal(false);
 
     list_ = new QListWidget(this);
@@ -93,7 +80,6 @@ PaletteWindow::PaletteWindow(PaletteStore* store, QWidget* parent)
     connect(add, &QPushButton::clicked, this, [this] {
         const QString name = store_->add("palette");
         refreshList();
-        // Select what was just made, which is what the user is about to edit.
         for (int row = 0; row < list_->count(); ++row) {
             if (list_->item(row)->text() == name) list_->setCurrentRow(row);
         }
@@ -103,8 +89,6 @@ PaletteWindow::PaletteWindow(PaletteStore* store, QWidget* parent)
     connect(remove_, &QPushButton::clicked, this, [this] {
         const QString name = selectedName();
         if (name.isEmpty()) return;
-        // Metasprites refer to palettes by name, so one still using this falls
-        // back to the placeholder view rather than to another palette.
         store_->remove(name);
         refreshList();
     });
@@ -121,8 +105,6 @@ PaletteWindow::PaletteWindow(PaletteStore* store, QWidget* parent)
         const QString from = selectedName();
         if (from.isEmpty() || name_->text().trimmed() == from) return;
         if (!store_->rename(from, name_->text())) {
-            // Taken or empty: the field goes back rather than leaving a name on
-            // screen that nothing is called.
             name_->setText(from);
             return;
         }
@@ -134,9 +116,6 @@ PaletteWindow::PaletteWindow(PaletteStore* store, QWidget* parent)
         swatches_[slot] = new QToolButton(editor);
         swatches_[slot]->setFixedSize(kSwatchPx * 3, kSwatchPx);
         if (slot == 0) {
-            // Shown for completeness -- a palette is four entries to the PPU --
-            // but index 0 is the backdrop a sprite shows through, so there is
-            // nothing to choose.
             swatches_[slot]->setEnabled(false);
             swatches_[slot]->setToolTip("Transparency -- always NES black");
             form->addRow("Transparency", swatches_[slot]);
@@ -153,8 +132,6 @@ PaletteWindow::PaletteWindow(PaletteStore* store, QWidget* parent)
     rows->addLayout(buttons);
     rows->addWidget(editor);
 
-    // The store can also change from elsewhere (a project being opened), so the
-    // window follows it rather than only its own edits.
     connect(store_, &PaletteStore::changed, this, [this] {
         if (list_->count() != static_cast<int>(store_->palettes().size())) refreshList();
         refreshEditor();

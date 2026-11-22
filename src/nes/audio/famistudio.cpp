@@ -2,32 +2,18 @@
 #include <pnes/technology.hpp>   // CREATE_SEGMENT_KEYWORD
 
 /**
- * @brief Placement keyword for this module's own code -- the section is the
- *        CONSUMING PROJECT'S choice, supplied as PNES_AUDIO_SECTION.
+ * @brief Placement keyword for this module's code; the section is the consuming
+ *        project's choice, supplied as PNES_AUDIO_SECTION.
  *
- * THE WHOLE POINT: the audio backend must land in the SAME PRG-ROM bank as
- * the engine it drives. A project already controls where the engine goes
- * (its FamiStudio config's FAMISTUDIO_CA65_CODE_SEGMENT, and the ca65 wrappers
- * around any exported data); this is the matching knob for this module, so the
- * two can be put side by side.
+ * The point: this has to land in the SAME PRG bank as the engine it drives. Once
+ * they are neighbours, nothing here switches banks at all -- a caller long-calls
+ * audio::Update(), and famistudio_update() inside it is an ordinary call because
+ * the caller's own switch brought both in together. Which is why nothing here
+ * includes a mapper header or names a bank.
  *
- * Once they are neighbours, THIS MODULE CONTAINS NO BANK-SWITCHING AT ALL.
- * A caller long-calls audio::Update(); inside it, famistudio_update() is an
- * ordinary call, because the engine is already mapped -- the caller's own
- * switch brought both in together. That is why nothing here includes a
- * mapper header, names a bank, or knows which mapper the board even has.
- *
- * DELIBERATELY NOT NAMED AFTER FAMISTUDIO. A replacement engine written in
- * C, C++, Rust or hand-written assembly binds to the same arrangement by
- * placing itself in the same section, with no change to audio.hpp -- its
- * functions are plain prototypes, satisfied by whichever backend source
- * file the project compiles in.
- *
- * COMPULSORY, not defaulted. There is no "unbanked" fallback value: a
- * default would silently place this module wherever the library guessed,
- * which is exactly the wrong-bank-with-no-diagnostic failure the rest of
- * this design works to make impossible. A project that banks nothing still
- * names the section its ordinary code lands in.
+ * Compulsory, not defaulted: a default would silently place this module wherever
+ * the library guessed, which is the wrong-bank-with-no-diagnostic failure the
+ * rest of this design exists to make impossible.
  */
 #ifndef PNES_AUDIO_SECTION
 #error "PNES_AUDIO_SECTION is not set. It names the ELF section this \
@@ -35,10 +21,6 @@ module's code is placed in, and MUST be the same bank the audio engine is \
 assembled into (see the project's FamiStudio config). Set it from CMake -- \
 local.cmake.example has a worked example."
 #endif
-// MODULE_PLACEMENT supplies the section and the noinline that makes the section
-// mean anything (see its comment). No `used`/`retain`: a farcall opens a bank
-// switch around an otherwise ordinary call, so LTO can see every reference, and
-// pinning only keeps uncalled API alive.
 #define AUDIO_BANK MODULE_PLACEMENT(PNES_AUDIO_SECTION)
 
 #include <intsh>
@@ -54,71 +36,26 @@ using namespace br0::intsh;
     #define FASTCALL void
 #endif
 
-/*
- * FamiStudio is assembled by a genuine standalone ca65 binary
- * (CMakeLists.txt), and its own config places it into whichever PRG-ROM bank
- * the project chose. EVERY FUNCTION IN THIS FILE IS TAGGED
- * ::AUDIO_BANK so it lands in that same bank -- which is the only reason the
- * calls below can be plain calls.
- *
- * THIS FILE CONTAINS NO BANK SWITCHING, deliberately, and includes no mapper
- * header. The caller long-calls audio::Update(); by the time control arrives
- * here the engine is already mapped, because it came in with this module. If
- * the engine reads data from a further bank (an exported song, say), mapping
- * that is likewise the caller's business, decided where the layout is decided
- * -- not hardcoded in the backend adapter.
- *
- * That keeps this file portable in the way that matters: swapping FamiStudio
- * for a different engine, or this board for one with no banking at all, is a
- * change to placement and to the caller, never to the code here.
- */
+// The engine's own entry points, as ca65 exports. FASTCALL because llvm-mos
+// passes the first arguments in registers, which is what the engine expects.
 extern "C" FASTCALL famistudio_music_play(u8 song_index);
 extern "C" FASTCALL famistudio_music_pause(u8 pause);
 extern "C" FASTCALL famistudio_music_stop(void);
 #if FAMISTUDIO_CFG_SFX_SUPPORT
 extern "C" FASTCALL famistudio_sfx_play(u8 sfx_index, u8 channel);
 #endif
-// GUARDED ON DPCM, NOT SFX, because it is a different capability: this routine
-// triggers the DMC channel from the sample list the engine was initialised
-// with, so FAMISTUDIO_CFG_DPCM_SUPPORT is what has to be on, independently of
-// whether the regular effect streams are compiled in. One argument, like
-// famistudio_music_play above, and for the same reason -- the engine wants the
-// index in A and nothing in X.
 #if FAMISTUDIO_CFG_DPCM_SUPPORT
 extern "C" FASTCALL famistudio_sfx_sample_play(u8 sample_index);
 #endif
 extern "C" FASTCALL famistudio_update(void);
 
-// famistudio_init wants its region byte in A: zero for PAL, non-zero for
-// NTSC (famistudio_ca65.s's FAMISTUDIO_INIT doc comment) -- the inverse of
-// this project's own Init(region) convention (1 = PAL, 0 = NTSC). `used`
-// makes it addressable by symbol from the raw asm text below, the same
-// pattern src/nes/input.cpp relies on for its poll scratch bytes (LLVM can't
-// see the reference inside opaque asm, so without `used` LTO strips it).
 extern "C" {
 __attribute__((used)) u8 famistudio_region_scratch;
 }
 
 #if FAMISTUDIO_CFG_SFX_SUPPORT
-/*
- * The effect bank, named HERE rather than by the project.
- *
- * FamiStudio's sound-effect exporter hardcodes this symbol: the table is
- * always `sounds`, always re-exported as `_sounds`, whatever the project or
- * its songs are called. So this backend can name it unaided, and a project
- * gets effects by having the export in the ROM and nothing else -- no table,
- * no macro, no binding line of its own. ::tracks is the opposite case and
- * stays the project's to define: FamiStudio names the music export after the
- * project (`music_data_<name>`), which this file cannot know.
- *
- * constexpr, SO IT OCCUPIES NO BYTES AT ALL. audio::Init hands the value to
- * famistudio_sfx_init through an inline-asm "i" (immediate) operand, so what
- * is needed is a link-time constant, not storage holding one -- the address
- * folds straight into `ldx #<` / `ldy #>` and no variable is emitted. That
- * also means there is nothing here for a placement keyword to place, which is
- * why this backend owning the symbol does not take a memory decision away
- * from the project (see audio.hpp's ::tracks on why that distinction matters).
- */
+// FamiStudio hardcodes its effect symbol as `sounds` whatever the project is
+// called, so this names it directly rather than taking it from the application.
 extern "C" { extern const u8 _sounds[]; }
 static constexpr const u8* sfx = _sounds;
 #endif
@@ -160,20 +97,6 @@ AUDIO_BANK void audio::TrackStop() {
     famistudio_music_stop();
 }
 
-// NO-OP, and not for want of trying: FamiStudio has no master level to scale.
-// Volume on the NES lives in the song data itself -- per note, and per channel
-// when FAMISTUDIO_USE_VOLUME_TRACK is on -- and the APU's own volume fields are
-// written by the engine from that data every frame, so anything this wrote
-// there would be overwritten by the next famistudio_update(). Scaling the
-// engine's output would mean re-deriving every channel's volume nibble after
-// the fact, which is a mixer this backend does not have and a cost the 2A03
-// cannot afford.
-//
-// Which is why the demo's NES options page offers DISABLE MUSIC rather than a
-// slider: on/off is the only music level this backend can actually honour, and
-// it is honoured where the song is started (demo/src/modes/level.cpp).
-// Defined rather than left out so a call site shared with every other target
-// still links here.
 AUDIO_BANK void audio::TrackVolume(const u8 percent) {
     (void)percent;
 }
@@ -182,15 +105,6 @@ AUDIO_BANK void audio::Update() {
     famistudio_update();
 }
 
-// @p volume IS DISCARDED, which is this driver's answer to audio.hpp's
-// deliberately meaningless byte and not an omission. FamiStudio's engine has
-// no per-effect level: an effect's volume lives per note inside the effect
-// data the exporter produced, so there is no entry point to scale it through
-// and nothing here to hand the byte to. famistudio_sfx_play takes an index and
-// a stream offset, and that is the whole of its interface.
-//
-// Unnamed, so the parameter costs nothing to ignore -- and the caller's own
-// setup for it is one immediate, since any value does.
 AUDIO_BANK void audio::SfxPlay(const u8 index, const u8 channel, const u8) {
 #if FAMISTUDIO_CFG_SFX_SUPPORT
     famistudio_sfx_play(index, channel);
@@ -199,21 +113,9 @@ AUDIO_BANK void audio::SfxPlay(const u8 index, const u8 channel, const u8) {
 #endif
 }
 
-// NO-OPS, AND NOT FOR WANT OF LOOKING. FamiStudio's engine exposes eight
-// public entry points; famistudio_music_pause and famistudio_music_stop are
-// among them and there is NO effect equivalent -- once famistudio_sfx_play has
-// written a stream, nothing in the public API takes it back. So these are the
-// honest implementation, not placeholders waiting on effort here.
-//
-// THE WARNING IS AT THE CALL SITE, not in this file: audio.hpp declares both
-// with ::PNES_SFX_UNSUPPORTED, so a project calling either gets told by the
-// compiler while this body stays genuinely free -- a runtime log would spend
-// ROM to report a function that does nothing. Workarounds that would make
-// these real (a silencing effect authored into the project, or poking the
-// engine's own stream state) are written up in
-// .ignore/famistudio-sfx-stop/NOTES.md; both cost more than they are worth
-// today, and a replacement NES driver is free to implement them, which is why
-// the two entry points exist in the API at all.
+// FamiStudio's engine has no entry point that cancels an effect, so this cannot
+// do what it is named for -- audio.hpp warns at the call site. See
+// .ignore/famistudio-sfx-stop/NOTES.md.
 AUDIO_BANK void audio::SfxStop(const u8 channel) {
     (void)channel;
 }
@@ -222,16 +124,6 @@ AUDIO_BANK void audio::SfxPause(const u8 channel, const u8 pause) {
     (void)channel; (void)pause;
 }
 
-// NOT A WRAPPER FOR SfxPlay, which is what this used to be: it called
-// famistudio_sfx_play(index, 1), i.e. REGULAR effect `index` on stream 1, so
-// the one entry point in this API documented as playing DPCM was the one that
-// could not. The engine has a separate routine for it, declared above.
-//
-// THE INDEX IS NOT AN EFFECT INDEX. It selects from the DPCM sample list the
-// engine holds -- which comes from the MUSIC export (the `.word @samples-4`
-// header in the generated song data), not from the SFX export, which has no
-// sample section at all. So this and ::SfxPlay take numbers from two
-// different tables that happen to share a type.
 AUDIO_BANK void audio::SfxSamplePlay(const u8 index) {
 #if FAMISTUDIO_CFG_DPCM_SUPPORT
     famistudio_sfx_sample_play(index);

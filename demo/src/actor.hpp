@@ -24,12 +24,9 @@ class Actor {
         Normal,     // default for that object (alive, moving whatever)
     };
 
-    // Collision is now a shared composite-metatile window read (see collision_map.hpp
-    // / Blocked), so the actor no longer carries any per-actor collision cursors.  The
-    // old surround constellation (four static column cursors + a dynamic anchor) lived
-    // in zero page on every actor and is gone.  Every caller passes
-    // collectBlocks=false, so coins pass for actors and player alike -- see
-    // collision_map.hpp on why that parameter is vestigial.
+    // Collision is a shared composite-metatile window read now, so an actor
+    // carries no per-actor cursors: the old four static columns plus a dynamic
+    // anchor lived in zero page on every actor.
     vec2<u16> worldSpace;          // top-left origin, sub-pixel: bottom 3 bits = subpx, so >>3 = px
     vec2<oam::oam_t> screen;       // on-screen sprite position (OAM coords)
     vec2<i8> moveForce;            // subpixel movement force (8 subpx = 1px)
@@ -38,11 +35,9 @@ class Actor {
     eActorState actorState;
     const u8* animationFrame;
     u8  animationTimer;
-    // Which way the actor is facing: false right, true left. A bool and not the
-    // sign of moveForce.x, because facing is an intent and velocity is not --
-    // skidding, being shoved, or standing still all leave an actor looking the
-    // way it last chose to. Whoever drives the actor latches it; the drawing
-    // side reads it (level.cpp's FeedOAM turns it into the OAM flip bit).
+    // False right, true left. A bool rather than the sign of moveForce.x, because
+    // facing is an intent and velocity is not -- skidding or standing still
+    // leaves an actor looking the way it last chose to.
     bool horizontalFacingDir;
 
     static constexpr vec2<u8> GetSize(const eActorType actorType) {
@@ -55,8 +50,7 @@ class Actor {
         return GetSize(this->actorType);
     }
 
-    // Behavior is dispatched on actorType (see Actor::Start/Update in
-    // actor.cpp), not through per-actor function pointers: no 2 bytes of hook
+    // Dispatched on actorType rather than per-actor function pointers: no hook
     // storage per actor and no indirect JSR per call.
     void Start();
     void Update();
@@ -64,12 +58,6 @@ class Actor {
     void Move(vec2<i8> delta);
 };
 
-// Metasprite field providers: derive the sprite coordinate from the actor's
-// location.  `i` is the metasprite cell index (2 wide x 4 tall: col = i&1, row = i>>1).
+// Metasprite field providers. `i` is the cell index, 2 wide by 4 tall.
 oam::oam_t AdjustSpriteY(const Actor* self, u16 i);
 oam::oam_t AdjustSpriteX(const Actor* self, u16 i);
-
-// the cursors for an NPC can be set on spawn from their metadata
-// the cursors can be moved by 1/-1 when moving up/down
-// the cursors can be moved by levelSize/-levelSize when moving forward/backward
-// the cursors can be reset

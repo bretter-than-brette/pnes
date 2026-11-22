@@ -1,10 +1,3 @@
-/**
- * @file types.hpp
- * @brief Shared scalar and struct typedefs.
- *
- * Included first by ::pnes.h so later subsystem headers can rely
- * on a single point for common typedefs as the library grows.
- */
 #pragma once
 
 #include <intsh>
@@ -40,18 +33,10 @@ struct vec2 {
         return *this;
     }
 
-    // Spelled out because the volatile operator= below is still *the* copy
-    // assignment operator -- cv on the implicit object parameter does not change
-    // that -- so declaring it suppresses the implicit one, and a plain `vec2`
-    // assignment would otherwise bind to the volatile overload and leave GCC
-    // warning that the `volatile vec2&` it hands back is dereferenced by nothing.
     constexpr vec2& operator=(const vec2& rhs) = default;
 
-    // Volatile-qualified overloads so `atomic vec2<t>` (volatile on NES, see
-    // the `atomic` macro) can still be assigned/mutated in place -- the
-    // implicit copy assignment operator the compiler would otherwise
-    // generate is never volatile-qualified, so without these an `atomic
-    // vec2<...>` object has no usable operator= at all.
+    /// A volatile object cannot use the implicit copy assignment, which takes a
+    /// plain `const vec2&`, so an `atomic vec2` needs this one spelt out.
     constexpr volatile vec2& operator=(const vec2& rhs) volatile {
         x = rhs.x;
         y = rhs.y;
@@ -68,7 +53,6 @@ struct vec2 {
         return *this;
     }
 
-    // element-wise conversion to a vec2 of another (convertible) element type
     template <addable u>
     constexpr operator vec2<u>() const {
         return { static_cast<u>(x), static_cast<u>(y) };

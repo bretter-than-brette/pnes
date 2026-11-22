@@ -1,14 +1,8 @@
 /**
  * @file video.cpp
- * @brief SDL3 presentation backend for the shared software PPU.
- *
- * The PPU emulation itself -- ::emu::GenerateFrame and every
- * nametable/attribute/palette/OAM write function plus the scroll and
- * sprite-zero machinery -- lives in src/emu/ppu.cpp and is shared verbatim with
- * the libogc/GX backend. This file is only the desktop-specific half: it opens
- * the window, paces frames off an SDL timer, locks a streaming texture, asks the
- * core to render one frame into it, and lets SDL's renderer scale it to the
- * window with nearest-neighbour filtering.
+ * @brief SDL3 presentation backend for the shared software PPU: opens the window,
+ *        paces frames off an SDL timer, and lets the renderer scale one streaming
+ *        texture with nearest-neighbour filtering.
  */
 #include "../SDL3/internal.hpp"
 
@@ -20,11 +14,6 @@
 #include <atomic>
 #include <SDL3/SDL.h>
 
-// ---------------------------------------------------------------------------
-// SDL-specific state. Everything the core needs (VideoRAM, paletteRAM, scroll,
-// PPUCTRL/PPUMASK, the OAM snapshot, patternTable, ...) is owned by src/emu;
-// only the genuine SDL objects live here.
-// ---------------------------------------------------------------------------
 SDL_Window   *window;
 SDL_Renderer *renderer;
 SDL_TimerID   timer_id;
@@ -49,9 +38,6 @@ static void toggle_fullscreen() {
     }
 }
 
-// Render one frame through the shared core into the streaming texture, then
-// blit it to the window. The core fills ARGB8888 pixels; SDL scales the
-// fixed NES surface up with SCALEMODE_NEAREST, matching the GX backend's quad.
 static void present_frame() {
     const int vpw = video::viewport_px();
     const int vph = video::viewport_py();
@@ -74,7 +60,6 @@ static void present_frame() {
 namespace video {
 
 void WaitForPresent() {
-    // pump events once
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
 
@@ -119,8 +104,6 @@ void WaitForPresent() {
         SDL_RenderClear(renderer);
         SDL_RenderPresent(renderer);
     }
-    /* Clear the pending IRQ slot between frames so a handler that was not
-     * reached this frame (e.g. fired too late) does not re-fire next frame. */
     irq::irqPendingValid = false;
     nmi_vector();
 }
@@ -136,9 +119,6 @@ void irq::init() {
     const SDL_DisplayID display = SDL_GetPrimaryDisplay();
     mode = SDL_GetCurrentDisplayMode(display);
 
-    // A tiny monitor crops the camera (scale/viewport_tx()/ty() can resolve
-    // below the NES's own 32x30); video::vram_bytes() (video.hpp) never sizes
-    // the nametable VRAM below the NES-hardware minimum regardless.
 #ifdef LANDSCAPE
     scale = mode->h / 240;
 #endif
@@ -148,8 +128,6 @@ void irq::init() {
     if (scale < 1) scale = 1;
     const unsigned vram = video::vram_bytes();
 
-    // The core owns VideoRAM/paletteRAM; the VRAM size policy is the backend's
-    // (window-derived on SDL, fixed two pages on OGC), so size it here.
     emu::InitMemory(vram);
 
     if (!SDL_CreateWindowAndRenderer(PROJECT_NAME, mode->w >> 1, mode->h >> 1, 0, &window, &renderer)) {

@@ -13,7 +13,6 @@
 namespace chr {
 namespace {
 
-/// One include file's bytes, resolved and read.
 struct Include {
     std::string               name;    ///< Filename stem, as blobman derives its symbols.
     std::string               path;    ///< As written in the manifest, for messages.
@@ -27,15 +26,6 @@ std::string hex(std::uint64_t value) {
     return text;
 }
 
-/**
- * @brief Decodes @p tiles consecutive tiles starting at @p byteOffset into
- *        palette indices, row-major and kTilePixels wide.
- *
- * 2bpp planar: for tile row y, the low bit of every pixel comes from byte
- * base+y and the high bit from base+y+8, MSB first (bit 7 is the leftmost
- * pixel). Bytes past the end of @p data read as 0, so a short final tile is
- * zero-padded rather than dropped.
- */
 std::vector<std::uint8_t> decodeTiles(const std::vector<std::uint8_t>& data,
                                       std::size_t byteOffset,
                                       int tiles) {
@@ -61,8 +51,6 @@ std::vector<std::uint8_t> decodeTiles(const std::vector<std::uint8_t>& data,
     return pixels;
 }
 
-/// Reads @p path, resolved against the manifest's directory and then the
-/// process working directory -- see loadManifest's note on blobman.
 bool readInclude(const std::filesystem::path& manifestDir,
                  const std::string& written,
                  std::vector<std::uint8_t>& out,
@@ -100,10 +88,6 @@ bool readInclude(const std::filesystem::path& manifestDir,
 
 namespace {
 
-/// Where one entry's tiles take their ids from. An entry reached through two
-/// frames has two of these, and is decoded once per frame -- the same pixels
-/// under two different ids, which is what being banked in two arrangements
-/// means.
 struct Placement {
     std::size_t frame = 0;       ///< Index into Table::frames; meaningless unless ::numbered.
     bool        numbered = false;///< False for a frameless load: the tiles get no id at all.
@@ -116,8 +100,6 @@ struct Placement {
 
 std::optional<Table> loadManifest(const std::filesystem::path& path, TileMode mode,
                                   std::string& error) {
-    // A frameless load is the browsing case, not a separate format -- so it is
-    // the same function with nothing to reach the tiles through.
     static const std::vector<Frame> none;
     return loadManifest(path, mode, none, error);
 }
@@ -128,8 +110,6 @@ std::optional<Table> loadManifest(const std::filesystem::path& path, TileMode mo
     try {
         config = toml::parse_file(path.string());
     } catch (const toml::parse_error& err) {
-        // description() is a string_view, and the source position is worth
-        // keeping: it is the only pointer at WHERE the manifest is malformed.
         std::ostringstream message;
         message << "failed to parse: " << err.description() << " (" << err.source().begin << ")";
         error = message.str();
@@ -156,9 +136,6 @@ std::optional<Table> loadManifest(const std::filesystem::path& path, TileMode mo
     std::filesystem::path manifestDir = path.parent_path();
     if (manifestDir.empty()) manifestDir = ".";
 
-    // Entry -> its includes, built alongside table.entries so both can be
-    // reordered into blob order together before any cell is emitted (blobman
-    // sorts by LMA, and the generated header reads in that order).
     std::vector<std::vector<Include>> entryIncludes;
 
     for (auto&& [key, node] : config) {
@@ -185,9 +162,6 @@ std::optional<Table> loadManifest(const std::filesystem::path& path, TileMode mo
             return std::nullopt;
         }
 
-        // Nothing here checks where the PPU would see the entry: an entry does
-        // not claim a PPU address any more, so there is no straddle question
-        // to ask. A window's fit inside its frame is where that now lands.
         if (lma + size > blobSize) {
             error = "entry: " + name + " does not fit inside the blob";
             return std::nullopt;
@@ -215,8 +189,6 @@ std::optional<Table> loadManifest(const std::filesystem::path& path, TileMode mo
                     error = "overflowed blob: " + name + " at include " + *written;
                     return std::nullopt;
                 }
-                // blobman rejects this because the include's symbol would not
-                // name a whole tile; the same applies to a cell here.
                 if (progress % kTileBytes) {
                     error = "include " + *written + " in entry: " + name +
                             " does not start on a tile boundary";
@@ -247,8 +219,6 @@ std::optional<Table> loadManifest(const std::filesystem::path& path, TileMode mo
         return std::nullopt;
     }
 
-    // toml tables iterate in key order, not source order, so sort into blob
-    // order -- which also makes the overlap check below a neighbour test.
     std::vector<std::size_t> order(table.entries.size());
     for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
     std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
@@ -274,10 +244,6 @@ std::optional<Table> loadManifest(const std::filesystem::path& path, TileMode mo
         }
     }
 
-    // Frames are the id space every cell below is numbered in, so they are
-    // validated before any cell is given an id out of one. Resolving them to
-    // placements here also means the cell loop never searches: an entry either
-    // has somewhere its tiles are reached from, or it has no cells.
     table.frames = frames;
 
     std::vector<std::vector<Placement>> placements(table.entries.size());
@@ -290,8 +256,6 @@ std::optional<Table> loadManifest(const std::filesystem::path& path, TileMode mo
             return std::nullopt;
         }
         for (std::size_t g = 0; g < f; ++g) {
-            // A sprite names its frame, so two frames with one name would make
-            // which ids it meant a coin toss.
             if (frames[g].name == frame.name) {
                 error = "two frames are both named: " + frame.name;
                 return std::nullopt;
@@ -301,10 +265,6 @@ std::optional<Table> loadManifest(const std::filesystem::path& path, TileMode mo
             error = "frame: " + frame.name + " declares no windows";
             return std::nullopt;
         }
-        // Equally sized is the whole premise -- a count that does not divide
-        // the id range would leave a window shorter than its neighbours and
-        // the base of every window after it would stop being a multiple of
-        // anything.
         if (kFrameTiles % static_cast<int>(frame.windows.size())) {
             error = "frame: " + frame.name + " has " + std::to_string(frame.windows.size()) +
                     " windows, which does not divide the " + std::to_string(kFrameTiles) +
@@ -323,9 +283,6 @@ std::optional<Table> loadManifest(const std::filesystem::path& path, TileMode mo
         const int half = frame.patternTable ? 1 : 0;
 
         for (std::size_t w = 0; w < frame.windows.size(); ++w) {
-            // An unnamed window is deliberate: it reserves its slice of the id
-            // range for whatever the game banks there, which this tool has no
-            // art for and no need to know about.
             if (frame.windows[w].empty()) continue;
 
             std::size_t index = table.entries.size();
@@ -373,49 +330,26 @@ std::optional<Table> loadManifest(const std::filesystem::path& path, TileMode mo
         }
     }
 
-    // No frames at all: every entry still contributes its art, unnumbered.
-    // There is nothing to number it from -- an id is what a frame makes of a
-    // tile, and there is no frame. See loadManifest's comment.
     if (frames.empty()) {
         for (std::size_t e = 0; e < table.entries.size(); ++e) {
             placements[e].push_back({ 0, false, 0, 0, -1 });
         }
     }
 
-    // One cell per tile, or per even-aligned tile pair in 8x16 mode -- once
-    // per placement, so an entry two frames reach appears under both.
     for (std::size_t e = 0; e < table.entries.size(); ++e) {
         for (const Placement& placement : placements[e]) {
             for (const Include& include : entryIncludes[e]) {
-                // Round up: a short final tile is shown zero-padded (warned above).
                 const int tiles = static_cast<int>((include.data.size() + kTileBytes - 1) / kTileBytes);
 
                 for (int tile = 0; tile < tiles;) {
-                    // Where the tile sits in its entry, which is all the manifest
-                    // decides. Everything else about an id comes from the frame.
                     const std::uint32_t tileInEntry =
                         (include.offset + static_cast<std::uint32_t>(tile) * kTileBytes) / kTileBytes;
 
-                    // The window's base plus the offset into it. No mask: the
-                    // entry was checked to fit its window, so this cannot leave
-                    // the frame. Unnumbered when no frame reached it at all.
                     const int id = placement.numbered
                                        ? placement.baseId + static_cast<int>(tileInEntry)
                                        : kNoId;
                     const int half = placement.half;
 
-                    // In 8x16 sprite mode the pattern byte's bit 0 selects the
-                    // pattern table and bits 7-1 select the pair, so a pair is
-                    // always an EVEN id followed by that id | 1. A pair can
-                    // therefore only start on an even tile, and an include whose
-                    // tiles do not pair up cleanly gets its odd tile shown on its
-                    // own rather than silently mispaired.
-                    //
-                    // Tested on the offset into the entry rather than on the id,
-                    // so it holds for an unnumbered cell too -- and it is the
-                    // same test either way: every window base is a multiple of
-                    // the window size, which is never odd, so an id's parity is
-                    // always its tileInEntry's parity.
                     const bool pairable = mode == TileMode::Size8x16 &&
                                           (tileInEntry % 2) == 0 && tile + 1 < tiles;
                     const int height = pairable ? 2 : 1;
@@ -435,10 +369,6 @@ std::optional<Table> loadManifest(const std::filesystem::path& path, TileMode mo
 
                     Cell cell;
                     cell.id             = id;
-                    // 8x16: bits 7-1 are the pair (always even, per the pairable
-                    // test) and bit 0 is the half, so which pattern table the
-                    // frame sits in survives into OAM.
-                    // 8x8: PPUCTRL picks the half, so the id goes out as-is.
                     cell.patternByte    = !placement.numbered ? kNoId
                                           : height == 2       ? ((id & 0xFE) | half)
                                                               : id;

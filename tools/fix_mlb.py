@@ -72,15 +72,12 @@ def elf_sections(path):
 
     def hdr(i):
         off = e_shoff + i * e_shentsize
-        # name, type, flags, addr, offset, size
         return struct.unpack_from("<IIIIII", data, off)
 
     _, _, _, _, str_off, _ = hdr(e_shstrndx)
     out = []
     for i in range(e_shnum):
         nm, typ, flags, addr, off, size = hdr(i)
-        # SHF_ALLOC only. Without the flags test, .debug_* sections match by
-        # address and every symbol "resolves" into debug data.
         if typ == 8 or not size or not flags & 0x2:
             continue
         end = data.index(b"\0", str_off + nm)
@@ -105,9 +102,6 @@ def main():
             sys.exit(f"fix_mlb: missing {p}")
 
     elf_bytes, sections = elf_sections(elf)
-    # PRG only -- CHR follows it in the file and Mesen indexes the two
-    # separately, so slicing at the header alone would make every offset near
-    # the end of PRG "verify" against pattern data.
     rom = nes.read_bytes()
     prg = rom[INES_HEADER:INES_HEADER + rom[4] * 16384]
 
@@ -119,13 +113,6 @@ def main():
 
     lines = mlb.read_text().splitlines()
 
-    # Decide ONCE for the whole file whether this is fresh SDK output, rather
-    # than per line. Fresh output has essentially every `G:` address inside an
-    # ELF VMA section; a file this script has already rewritten has almost
-    # none. Judging line by line looked fine but silently re-converted the
-    # handful of PRG offsets that happen to land inside some section's VMA
-    # range -- and the byte check cannot catch that, because a double-converted
-    # address can still point at bytes that match.
     code = [l.strip() for l in lines
             if l.strip().startswith("G:") and l.count(":") >= 2]
     resolvable = 0
@@ -134,9 +121,6 @@ def main():
             resolvable += section_of(int(l.split(":")[1].split("-")[0], 16)) is not None
         except ValueError:
             pass
-    # Re-typing to P: makes this stronger than it was: a rewritten file has no
-    # G: code lines left to resolve at all, so `code` shrinks to the handful of
-    # genuine registers and unplaceable ca65 symbols.
     if code and resolvable * 2 < len(code):
         print(f"fix_mlb: {mlb.name} already converted "
               f"({resolvable}/{len(code)} G: lines still look like VMAs) -- nothing to do")
@@ -153,33 +137,18 @@ def main():
             out.append(raw)
             continue
 
-        # Addresses may be a single value or a `start-end` range.
         try:
             parts = [int(a, 16) for a in addrs.split("-")]
         except ValueError:
             out.append(raw)
             continue
 
-        # No containing section means one of two things, and both are
-        # pass-through. Either the address is already a PRG offset (this script
-        # ran before -- that is what makes it idempotent), or the symbol came
-        # from a ca65 object and carries a raw $8000-window address with no bank
-        # encoding at all, so the ELF cannot say which bank it is in. The
-        # FamiStudio symbols are the latter: `famistudio_update` at $8182 could
-        # be any banked domain. Leaving them alone keeps them exactly as broken
-        # as they are today rather than converting them to a confidently wrong
-        # offset -- see 99-REFERENCE-address-mapping.md.
         sec = section_of(parts[0])
         if sec is None:
             out.append(raw)
             passed += 1
             continue
 
-        # A `G:` label that does not land inside the PRG image is not ROM code
-        # at all and Mesen has nothing to point it at. The log metadata is the
-        # real case: `.pnes_log` sits at the sentinel VMA 0x04000000 because
-        # log()'s strings are extracted at build time (see lua_log_builder) and
-        # never ship. Drop those rather than emit a label aimed at nothing.
         if not all(0 <= to_prg(v) < len(prg) for v in parts):
             dropped += 1
             continue
@@ -197,7 +166,6 @@ def main():
                 break
             new.append(f"{p:x}")
         else:
-            # P:, not G: -- this is PRG ROM code, not a register.
             out.append(f"P:{'-'.join(new)}:{rest}")
             converted += 1
             continue

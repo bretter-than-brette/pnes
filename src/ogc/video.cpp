@@ -1,34 +1,11 @@
 /**
  * @file video.cpp
- * @brief GX-native (Flipper/Hollywood) presentation backend for GameCube + Wii.
+ * @brief GX-native presentation backend for GameCube and Wii.
  *
- * The NES PPU emulation is platform-agnostic and lives in src/emu/; this file is
- * only the GameCube/Wii-specific half, and it does NOT rasterise on the CPU. It
- * hands the NES's own primitives to GX:
- *
- *   - The CHR ROM becomes a GX_TF_CI4 (4bpp paletted) atlas: each 8x8 NES tile
- *     is one CI4 block, so all 512 tiles fit a 128x256 atlas. Each slot is baked
- *     through the mapper's tile translator, so a CHR bank switch -- including
- *     one a scanline IRQ handler makes part-way down the frame, as the demo's
- *     HUD split does -- gets its own atlas and its own bands (see ATLAS_SLOTS).
- *   - paletteRAM becomes GX_TL_RGB5A3 TLUTs (4 background + 4 sprite), rebuilt
- *     each frame. Colour index 0 maps to RGB5A3 0x0000 (alpha 0); an alpha-test
- *     discard reproduces NES transparency -- background colour-0 shows the
- *     backdrop clear, sprite colour-0 is a hole.
- *   - The nametable is drawn as a grid of textured quads and the visible sprites
- *     as up to 64 more; Flipper rasterises and scales them to the TV.
- *
- * The frame is driven by ::emu::GenerateBands so the scanline IRQ handlers (the
- * game's per-frame logic, incl. the sprite-zero scroll split) still fire in
- * raster order. Painter order reproduces NES priority: behind-sprites, then the
- * background (colour-0 transparent), then front-sprites.
- *
- * The GX-native tiles/sprites live in NES pixel space (256x240) and let the
- * viewport scale them to the TV. The development profiler overlay (Debug builds
- * only, gated by OGC_PROFILER) lives in screen-pixel space; its projection and
- * draw path compile out of Release .dols entirely.
- *
- * Frame pacing is the real VBlank (VIDEO_WaitVSync), double-buffered.
+ * The PPU emulation is in src/emu/; this hands its primitives to GX instead of
+ * rasterising. CHR becomes a CI4 atlas, paletteRAM becomes RGB5A3 TLUTs, and the
+ * nametable and sprites are textured quads. Driven by emu::GenerateBands so
+ * scanline IRQ handlers still fire in raster order.
  */
 #include "internal.hpp"
 
@@ -51,124 +28,45 @@
 #include <wiiuse/wpad.h>
 #endif
 
-// ---------------------------------------------------------------------------
-// Wii shutdown handshake.
-//
-// A Wii title is expected to answer IOS/STM power-down and reset requests
-// itself; nothing here did, so the GameCube-oriented "loop forever, the
-// loader/BIOS reclaims the machine on exit" model left the Wii side with no
-// way to ever satisfy that handshake. On real hardware this mostly goes
-// unnoticed (the HOME menu still works). In Dolphin, choosing Stop for a Wii
-// title sends that same STM power-button event and then waits for the title
-// to call SYS_ResetSystem in response -- which never happened, so Dolphin
-// sits on "Shutting Down" forever. The GameCube target has no such handshake
-// (Dolphin just halts the CPU on Stop), which is why only Wii is affected.
-//
-// The callbacks below just set the existing `quit` flag so the ordinary
-// `while (!quit)` game loop (demo/src/main.cpp) unwinds normally; post()
-// below then completes the handshake with the real SYS_ResetSystem call.
-//
-// WHICH handshake depends on why we are leaving, so the callbacks also record
-// their intent. Only the power button means "turn the console off"; a quit from
-// the game itself, or the physical Reset button, means "go back where I came
-// from" -- and where that is differs between an HBC .dol and an installed
-// channel, which is what resolve below sorts out.
+// Without these a Wii title never answers IOS/STM's power-down request, which
+// leaves Dolphin's Stop stuck on "Shutting Down" forever. post() completes it.
 #ifdef TARGET_WII
 enum ExitIntent { EXIT_RETURN, EXIT_POWEROFF };
 static ExitIntent exit_intent = EXIT_RETURN;
 static void wii_power_callback() { exit_intent = EXIT_POWEROFF; quit = 1; }
 static void wii_remote_power_callback(s32 chan) { exit_intent = EXIT_POWEROFF; quit = 1; }
 
-// The Homebrew Channel (and loaders that mimic it) copy a small "return to
-// loader" stub to 0x80001800 and stamp the magic "STUBHAXX" just after it.
-// libogc's exit path jumps to that stub, so when it is present the correct
-// thing to do is simply RETURN from post() and let the loader reclaim the
-// machine -- calling SYS_ResetSystem(SYS_RETURNTOMENU) instead would skip
-// the loader and drop the user at the System Menu, losing HBC.
-//
-// An installed WAD/channel has no such stub: nothing will reclaim the machine,
-// so the title must hand itself back to the System Menu explicitly. Booting
-// off a disc or via a forwarder that cleared the stub lands here too, which is
-// the right behaviour in both cases.
+// HBC-style loaders stamp "STUBHAXX" after their return stub at 0x80001800.
+// With it present, returning from post() hands the machine back to the loader;
+// SYS_RETURNTOMENU would skip it and drop the user at the System Menu.
 static bool loader_stub_present() {
     return memcmp(reinterpret_cast<const void *>(0x80001804), "STUBHAXX", 8) == 0;
 }
 #endif
 static void wii_reset_callback(u32 irq, void *ctx) { quit = 1; }
 
-// ---------------------------------------------------------------------------
-// Shared GX / video state. All fixed for the window's lifetime.
-// ---------------------------------------------------------------------------
-// Double-buffered external framebuffers: VI scans out xfb[fbi^1] while GX copies
-// the next frame into xfb[fbi].
 static void       *xfb[2]  = { nullptr, nullptr };
 static u32         fbi     = 0;           // index GX copies into this frame
 static GXRModeObj *rmode   = nullptr;     // preferred TV mode (NTSC/PAL/MPAL)
 static void       *gp_fifo = nullptr;     // GX command FIFO
 
-// GX command FIFO size. libogc only defines the floor (GX_FIFO_MINSIZE, 64KB);
-// 256KB is the conventional default used by the libogc GX examples.
 static constexpr u32 FIFO_SIZE = 256 * 1024;
 static int         efbH, fbW;             // EFB dimensions (scissor / overlay)
 
-// World columns visible this run (tiles) -- declared in video.hpp, computed
-// once in init() below from the real TV pixel width and display aspect. NOT
-// static: video.hpp's video::viewport_tx() reads it from every other
-// translation unit.
 u16 ogc_world_tx;
 
-// NES-space projection (viewport_px() x viewport_py()) for the GX-native
-// tiles/sprites. Rebuilt by apply_aspect() below rather than only at init,
-// since on GameCube the viewport width can change at runtime.
 static Mtx44       proj_nes;
 #if defined(OGC_PROFILER)
-// Screen-pixel space, profiler overlay only. Built once at init: it follows the
-// framebuffer, which no aspect change touches.
 static Mtx44       proj_screen;
 #endif
 
-// ---------------------------------------------------------------------------
-// Display aspect: 4:3 or 16:9.
-//
-// Neither console changes its VIDEO output for a widescreen TV -- VI scans out
-// the same 640x480 (or whatever rmode says) either way and the SET stretches
-// it. So the aspect is not something the video mode can be asked about; it is
-// a separate fact about the display, and all it changes here is how many world
-// columns that framebuffer has to cover before the result reads as square
-// pixels (see video::viewport_tx()'s own comment in video.hpp).
-//
-// The Wii knows the answer: the TV screen format lives in its SYSCONF, which
-// is what the System Settings widescreen option writes, and CONF_GetAspectRatio
-// reads it over IOS.
-//
-// The GameCube cannot know it. The whole of its persistent config is the 64
-// bytes of RTC-backed SRAM the IPL writes -- language, video mode (NTSC/PAL/
-// MPAL), mono/stereo, progressive scan, EuRGB60, horizontal screen offset and
-// the RTC counter bias (the `syssram` struct, libogc's ogc/system.h) -- and
-// there is no aspect field among them, nor any EDID on an analog cable to
-// probe. CONF_GetAspectRatio itself does not even exist in a GameCube build:
-// libogc guards the entire CONF_* family behind `#if defined(HW_RVL)`
-// (ogc/conf.h), because it is an IOS/SYSCONF reader and the GameCube has
-// neither. This is precisely why GameCube games shipped their own widescreen
-// toggles, so the GC side is TOLD instead, by the game, through
-// video::ogc::SetWidescreen below.
-// ---------------------------------------------------------------------------
-// The two viewport widths this TV mode resolves to, 4:3 and 16:9, both filled
-// in by init() below. Held separately rather than recomputed because the
-// GameCube can switch between them at runtime (video::ogc::SetWidescreen) and
-// both have to agree exactly with the width VRAM was sized for.
+// The GameCube has no aspect field in SRAM and no EDID to probe, so it has to
+// be told (video::ogc::SetWidescreen); the Wii reads SYSCONF. Both widths are
+// resolved up front because the GameCube can switch between them at runtime.
 static u16  world_tx_4_3   = 32;
 static u16  world_tx_16_9  = 32;
-// Which of the two is currently in effect. GameCube default is 4:3 -- the
-// era-correct assumption for an unmodified console on an unknown TV, and what
-// a game overrides by calling video::ogc::SetWidescreen. On Wii this is
-// whatever SYSCONF says and never moves again.
 static bool widescreen_now = false;
 
-// Points ogc_world_tx at the current choice and rebuilds the projection that
-// maps it onto the framebuffer. The framebuffer, the VI mode and the GX
-// viewport/scissor are all untouched: this is anamorphic widescreen, so the
-// only thing that changes is how much world is drawn into the same pixels.
 static void apply_aspect() {
     ogc_world_tx = widescreen_now ? world_tx_16_9 : world_tx_4_3;
     guOrtho(proj_nes, 0, video::viewport_py(), 0, video::viewport_px(), 0, 300);
@@ -176,17 +74,6 @@ static void apply_aspect() {
 }
 
 #if defined(TARGET_GC)
-// Runtime switch, available in EVERY GameCube build -- see the declaration in
-// video.hpp for why the GameCube has to be told rather than asked, and for the
-// redraw a caller owes after flipping it. Deliberately not a build option:
-// whether a particular console is on a widescreen set is a property of that
-// player's living room, not of the disc.
-//
-// emu::ComputeNtGeometry() re-derives the page layout from video::viewport_tx()
-// on every call and nothing caches it, so changing ogc_world_tx here is the
-// whole switch as far as the core is concerned. What it does NOT do is move the
-// bytes already in VRAM into their new positions -- hence the redraw
-// requirement documented at the declaration.
 void video::ogc::SetWidescreen(const bool on) {
     if (on == widescreen_now) return;
     widescreen_now = on;
@@ -194,46 +81,26 @@ void video::ogc::SetWidescreen(const bool on) {
 }
 #endif
 
-// ===========================================================================
-// GX-NATIVE renderer state + helpers.
-// ===========================================================================
-// CHR atlas: 512 tiles, 16 per row -> 128x256 texels, GX_TF_CI4 (4bpp), 8x8
-// blocks of 32 bytes each. One NES tile == one CI4 block.
 static constexpr int ATLAS_TILES_X = 16;
 static constexpr int ATLAS_W       = ATLAS_TILES_X * 8;          // 128
 static constexpr int ATLAS_H       = (512 / ATLAS_TILES_X) * 8;  // 256
-//
-// MID-FRAME CHR SWITCHING: one atlas is not enough. The game banks CHR inside a
-// scanline IRQ handler -- the demo's HUD split hands the top rows the `ui` entry
-// and the playfield the `staticLevelTiles` entry, and both are mapped at the
-// SAME PPU window ($0400), so the two states of that window must both be on
-// screen in one frame. Because ::emu::GenerateBands fires each handler between
-// the bands it affects, each band can be drawn from its own atlas -- but the GP
-// consumes the FIFO asynchronously, so re-baking one buffer in place mid-frame
-// would repaint quads that were already queued (and are possibly still being
-// rasterised) from the older bank. Hence a small ring of atlas buffers: a band
-// whose CHR generation differs from the bound one bakes into the NEXT buffer and
-// binds that, leaving earlier bands' texels untouched for the GP to finish with.
+// A ring, because the GP consumes the FIFO asynchronously: re-baking one buffer
+// mid-frame would repaint bands already queued from the older bank.
 static constexpr int ATLAS_SLOTS = 4;
 static u8       *chr_atlas[ATLAS_SLOTS] = {};
 static GXTexObj  chrTexObj[ATLAS_SLOTS];
-// ::ppu::chrGeneration each slot was last baked from. Sentinel (not 0,
-// ::chrGeneration's own initial value) marks a slot as holding nothing.
 static u32       atlas_gen[ATLAS_SLOTS]  = { ~0u, ~0u, ~0u, ~0u };
 static int       atlas_cur  = 0;   // slot currently bound / matching the banks
 static int       atlas_ring = 0;   // next slot the ring hands out
 static int       atlas_baked_this_frame = 0;   // bakes since the last GX_DrawDone
 
-// Per-palette TLUTs, rebuilt each frame from paletteRAM. CI4 needs 16 entries.
-// 32-byte aligned: GX_LoadTlut DMAs the source by physical address and requires
-// 32-byte alignment, else it reads from the aligned-down address (garbage TLUT).
+// 32-byte aligned: GX_LoadTlut DMAs by physical address and reads from the
+// aligned-down one otherwise.
 alignas(32) static u16 tlut_bg[4][16];
 alignas(32) static u16 tlut_spr[4][16];
 static GXTlutObj tlutBgObj[4];
 static GXTlutObj tlutSprObj[4];
 
-// The fixed NES master palette (ARGB8888, 0xAARRGGBB), shared verbatim with the
-// software PPU in src/emu/ppu.cpp; here it only seeds the per-frame TLUTs.
 static constexpr u32 nes_rgb[64] = {
     0xFF626262, 0xFF012090, 0xFF1B0CA4, 0xFF3B009E,
     0xFF520080, 0xFF5A004E, 0xFF521610, 0xFF3F2E00,
@@ -253,46 +120,19 @@ static constexpr u32 nes_rgb[64] = {
     0xFFB4E8F0, 0xFFB8B8B8, 0xFF000000, 0xFF000000,
 };
 
-// Background cells gathered per band, bucketed by palette so each palette is a
-// single TLUT load + GX_Begin batch. A single band can cover the WHOLE screen
-// (no mid-frame IRQ split, e.g. the title screen) and, worse, can land every
-// one of its cells in the SAME palette bucket -- title's
-// ppu::Flush(chrEmpty_tile, 0xff) leaves most of the nametable at attribute
-// 0xFF (palette 3), so that one bucket alone must hold a full band's worth of
-// cells, not band_cells/4. Each bucket therefore needs capacity for
-// (viewport width in tiles + 1) x (viewport height in tiles + 1) cells -- the
-// +1s cover the partial edge tile a non-zero fine scroll adds on each axis.
-// viewport_tx() is runtime here (ogc_world_tx, video.hpp), so this can't be
-// sized from it directly; its own formula -- ((square_w/ogc_scale)>>3)&~3,
-// square_w <= fbWidth*4/3 <= 853, ogc_scale >= 1 -- caps out at 104 tiles wide
-// (a 240p/double-strike TV mode forces ogc_scale down to 1, and a 16:9 display
-// widens square_w by a further 4/3 on top of that; the same worst case was 80
-// before the aspect term existed), height is always the fixed 30.
-// A too-small bound overflows bg_bucket[3][MAX_CELLS] straight into adjacent
-// static data (TLUTs, chr_atlas state, ...), which reads as a mostly-blank/
-// corrupted screen and can crash much later when that state is next touched
-// -- this is exactly what happened on the 3DS backend's equivalent buffer,
-// whose narrower fixed 33x32 bound this one used to share, before its
-// viewport (also wider than 32 tiles) overflowed it on the very same title
-// screen. Sized for the 104x30 extreme rather than the common 40x30 (4:3) or
-// 52x30 (16:9) case.
+// One bucket must hold a whole band's cells, not band_cells/4 -- a single
+// palette can cover the screen. Sized for the 104x30 worst case (240p
+// double-strike at 16:9); too small overflows into adjacent statics.
 struct Cell { u16 atlas; i16 sx; i16 sy; };
 static constexpr int MAX_CELLS = 105 * 31;
 static Cell  bg_bucket[4][MAX_CELLS];
 static int   bg_count[4];
 
-// 0xAARRGGBB -> RGB5A3 opaque (bit15 set, 5/5/5).
 static inline u16 rgb5a3_opaque(const u32 argb) {
     const u32 r = (argb >> 16) & 0xFF, g = (argb >> 8) & 0xFF, b = argb & 0xFF;
     return static_cast<u16>(0x8000 | ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3));
 }
 
-// Convert the CHR ROM into the CI4 atlas, resolving each of the 512 PPU tile
-// slots through the mapper's currently-bound translator (see ::ppu::ResolveTile
-// and ::ppu::chrGeneration). NROM's translator is the identity function, so
-// for a non-bank-switching game this is byte-for-byte the old init-only bake;
-// a bank-switching mapper (MMC3) instead needs this re-run whenever it
-// switches a CHR bank -- see render_gx's dirty check.
 static void build_chr_atlas(const int slot) {
     constexpr int blocks_per_row = ATLAS_W / 8;   // 16
     u8 *const dst = chr_atlas[slot];
@@ -315,11 +155,6 @@ static void build_chr_atlas(const int slot) {
     atlas_gen[slot] = ppu::chrGeneration;
 }
 
-// Bind an atlas that matches the CHR banks as they stand RIGHT NOW, baking one
-// if no slot holds this generation. Called at the head of every band and sprite
-// batch, so a bank switch performed by a scanline IRQ handler takes effect from
-// the next band onward -- the GX analogue of the emu PPU routing each tile fetch
-// through ::ppu::ResolveTile. Cheap no-op (one compare) when nothing switched.
 static void sync_chr_atlas() {
     if (atlas_gen[atlas_cur] == ppu::chrGeneration) return;
 
@@ -331,10 +166,7 @@ static void sync_chr_atlas() {
         }
     }
 
-    // More distinct bank states in one frame than the ring has buffers: the only
-    // safe way to reuse a buffer this frame has already drawn from is to let the
-    // GP catch up first. A stall, not corruption -- and unreachable for any
-    // sane split count (the demo uses two states per frame).
+    // More bank states this frame than the ring has buffers: stall, not corrupt.
     if (atlas_baked_this_frame >= ATLAS_SLOTS) {
         GX_DrawDone();
         atlas_baked_this_frame = 0;
@@ -347,15 +179,11 @@ static void sync_chr_atlas() {
     GX_InvalidateTexAll();
 }
 
-// Bind the live atlas slot to TEXMAP0 with the TLUT the caller just loaded.
 static inline void load_chr_tex() {
     GX_InitTexObjTlut(&chrTexObj[atlas_cur], GX_TLUT0);
     GX_LoadTexObj(&chrTexObj[atlas_cur], GX_TEXMAP0);
 }
 
-// Rebuild the per-palette TLUTs from paletteRAM and set the backdrop clear.
-// Index 0 is transparent (alpha-test discarded) for both BG and sprites: BG
-// colour-0 then shows the backdrop clear, sprite colour-0 is a hole.
 static void build_tluts() {
     for (int p = 0; p < 4; p++) {
         tlut_bg[p][0]  = 0x0000;
@@ -370,16 +198,12 @@ static void build_tluts() {
         GX_InitTlutObj(&tlutSprObj[p], tlut_spr[p], GX_TL_RGB5A3, 16);
     }
 
-    // Backdrop = universal background colour (paletteRAM[0]). GX_CopyDisp clears
-    // the EFB to this for the *next* frame; the backdrop is effectively static
-    // in this game, so the one-frame latency is invisible.
     const u32 bd = nes_rgb[paletteRAM[0] & 0x3F];
     const GXColor c = { static_cast<u8>(bd >> 16), static_cast<u8>(bd >> 8),
                         static_cast<u8>(bd), 0xFF };
     GX_SetCopyClear(c, GX_MAX_Z24);
 }
 
-// Emit one 8x8 textured quad (NES pixel coords). flipH/flipV swap the UVs.
 static inline void quad(const int ax, const int ay, const int sx, const int sy,
                         const bool flipH, const bool flipV) {
     const f32 u0 = static_cast<f32>(ax)     / ATLAS_W;
@@ -396,18 +220,10 @@ static inline void quad(const int ax, const int ay, const int sx, const int sy,
     GX_Position2f32(x0, y1); GX_TexCoord2f32(ul, vb);
 }
 
-// ::emu::band_emit_fn: draw the nametable for screen rows [y0,y1) at the given
-// scroll. Background colour-0 is transparent so behind-sprites / backdrop show.
 static void draw_bg_band(const int y0, const int y1, const u16 xs, const u16 ys) {
-    // The handler that opened this band may have switched a CHR bank (the HUD
-    // split does exactly that), so re-resolve the atlas before drawing it.
     sync_chr_atlas();
 
     const int vpw      = video::viewport_px();
-    // Shared with the SDL/desktop core (::emu::ComputeNtGeometry,
-    // src/emu/emu.hpp) so this backend's read side stays byte-for-byte
-    // consistent with the one write side (::ppu::CartesianToAddress's
-    // internal xy_to_nt_addr/xy_to_at_addr, src/emu/ppu.cpp).
     const emu::NtGeometry geo = emu::ComputeNtGeometry();
     const int world_w  = geo.worldW;
     const int world_h  = geo.worldH;
@@ -448,7 +264,6 @@ static void draw_bg_band(const int y0, const int y1, const u16 xs, const u16 ys)
         }
     }
 
-    // Clip output to the band (EFB coords) so partial top/bottom tiles cut clean.
     const int e0 = y0 * efbH / 240;
     const int e1 = y1 * efbH / 240;
     GX_SetScissor(0, e0, fbW, e1 - e0);
@@ -466,21 +281,12 @@ static void draw_bg_band(const int y0, const int y1, const u16 xs, const u16 ys)
     }
 }
 
-// Draw the visible sprites of the requested priority class. NES sprite colour-0
-// is transparent (alpha-test discarded). y is +1 vs OAM (matches the PPU).
 static void draw_sprites(const bool behind) {
     sync_chr_atlas();
 
     const oam::sprite_t *oam = emu::OamShadow();
     const int  vpw    = video::viewport_px();
     const bool tall   = ppu::PPUCTRL & ppu::ctrl::SPRITE_SIZE;
-    // Sprite clipping here is the two FAR edges only. OAM coordinates are
-    // unsigned on every target (::oam::oam_t) and real NES hardware cannot
-    // overhang the left or top edge either, so there is no negative case to
-    // test -- and unlike the GBA/DS backends this one applies no window
-    // transform to sprite Y, so nothing can push an on-screen sprite negative
-    // afterwards. That same absence is why the park band (::oam::parked) needs
-    // no test of its own: 0xF0..0xFF is past 240, so the vertical clip has it.
     const int  atlas0 = (ppu::PPUCTRL & ppu::ctrl::SPRITE_ADDR) ? 256 : 0;
     const int  quads_per_sprite = tall ? 2 : 1;
 
@@ -516,9 +322,6 @@ static void draw_sprites(const bool behind) {
                 quad((ti & 15) * 8, (ti >> 4) * 8, sx, sy, flipH, flipV);
                 continue;
             }
-            // 8x16: tile bit 0 selects the pattern table (overriding SPRITE_ADDR),
-            // tile & 0xFE is the top-half tile of the pair. A vertical flip swaps
-            // which half draws on top as well as flipping each half's rows.
             const int pair = (o.tile & 1) * 256 + (o.tile & 0xFE);
             const int top_ti = pair + (flipV ? 1 : 0);
             const int bot_ti = pair + (flipV ? 0 : 1);
@@ -531,22 +334,13 @@ static void draw_sprites(const bool behind) {
 
 static void band_noop(int, int, u16, u16) {}
 
-// ===========================================================================
-// GX pipeline mode setters. Each frame asserts the mode it needs, so the two
-// renderers + overlay can interleave on one binary without state bleed.
-// ===========================================================================
 
-// REPLACE with a CI4 texture (GX-native tiles/sprites). Alpha test discards
-// colour index 0 to reproduce NES transparency.
 static inline void gx_mode_tiles() {
     GX_SetNumTexGens(1);
     GX_SetNumChans(1);
     GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLORNULL);
     GX_SetTevOp(GX_TEVSTAGE0, GX_REPLACE);
-    // Alpha-test discards CI index 0 (TLUT entry 0x0000, alpha 0) to reproduce
-    // NES transparency: background colour-0 then shows the backdrop clear, sprite
-    // colour-0 is a hole. (This requires the TLUTs to be 32-byte aligned so
-    // GX_LoadTlut reads the real alpha bits -- see tlut_bg/tlut_spr.)
+    // Discards CI index 0, which is how NES transparency is reproduced.
     GX_SetAlphaCompare(GX_GREATER, 0, GX_AOP_AND, GX_GREATER, 0);
     GX_ClearVtxDesc();
     GX_SetVtxDesc(GX_VA_POS,  GX_DIRECT);
@@ -554,7 +348,6 @@ static inline void gx_mode_tiles() {
 }
 
 #if defined(OGC_PROFILER)
-// Pass the per-vertex colour straight through (the profiler overlay quads).
 static inline void gx_mode_flat() {
     GX_SetNumTexGens(0);
     GX_SetNumChans(1);
@@ -568,16 +361,9 @@ static inline void gx_mode_flat() {
     GX_SetVtxDesc(GX_VA_CLR0, GX_DIRECT);
 }
 
-// ---------------------------------------------------------------------------
-// Profiler overlay. The sampler (profiler.cpp) gives us the hottest main-thread
-// PCs; here we draw each as an 8-digit hex address plus a bar (length relative
-// to the hottest entry), in screen-pixel space using flat per-vertex-colour
-// quads. Read the hex off-screen and resolve it with tools/profsym.sh.
-// ---------------------------------------------------------------------------
 static constexpr int   PROF_ROWS = 12;
 static constexpr float PX        = 2.0f;    // overlay "pixel" size, ortho units
 
-// 3x5 hex glyphs: 5 rows top->bottom; low 3 bits are columns left->right.
 static const u8 kFont[16][5] = {
     {0b111,0b101,0b101,0b101,0b111}, // 0
     {0b010,0b110,0b010,0b010,0b111}, // 1
@@ -607,7 +393,6 @@ static inline void flat_rect(float x0, float y0, float x1, float y1,
     GX_End();
 }
 
-// Draw one hex glyph at (gx,gy); returns the x advance (3px glyph + 1px gap).
 static float draw_glyph(int nibble, float gx, float gy, u8 r, u8 g, u8 b) {
     const u8* rows = kFont[nibble & 0xF];
     for (int ry = 0; ry < 5; ry++)
@@ -619,7 +404,6 @@ static float draw_glyph(int nibble, float gx, float gy, u8 r, u8 g, u8 b) {
     return 4 * PX;
 }
 
-// Draw the hottest-PC table. Call only after gx_mode_flat() + screen-space proj.
 static void draw_overlay() {
     ProfEntry top[PROF_ROWS];
     ProfStats st;
@@ -646,16 +430,8 @@ static void draw_overlay() {
 }
 #endif // OGC_PROFILER
 
-// ===========================================================================
-// Per-frame renderer.
-// ===========================================================================
 
-// GX-NATIVE path: no CPU raster. GenerateBands walks the IRQ timeline (running
-// game logic) and calls draw_bg_band per scroll-constant band; sprites bracket
-// the background for NES priority.
 static void render_gx() {
-    // GX_DrawDone() at the end of the last WaitForPresent drained the GP, so
-    // every atlas buffer is free again for this frame's ring to hand out.
     atlas_baked_this_frame = 0;
 
     GX_LoadProjectionMtx(proj_nes, GX_ORTHOGRAPHIC);
@@ -666,22 +442,15 @@ static void render_gx() {
     gx_mode_tiles();
 
     if (bg || spr) {
-        // The atlas is NOT resolved here: a mapper (MMC3) can switch a CHR
-        // bank from inside a scanline IRQ handler, which runs part-way through
-        // GenerateBands below, so the bake is driven per band by
-        // sync_chr_atlas() instead. An unbanked (NROM) game never pays for it
-        // past the one build done in init() -- the generation never moves.
+        // Not resolved here: a scanline IRQ can switch CHR part-way through
+        // GenerateBands, so sync_chr_atlas() bakes per band instead.
         build_tluts();
         GX_InvalidateTexAll();
 
-        // NES priority order: behind-sprites under the background, the
-        // background (colour-0 transparent) over them, front-sprites on top.
         if (spr) draw_sprites(true);
         emu::GenerateBands(bg ? draw_bg_band : band_noop);  // also runs game logic
         if (spr) draw_sprites(false);
     } else {
-        // Rendering off: still walk the timeline so the IRQ handlers (game
-        // logic) fire; the EFB stays at the backdrop clear.
         emu::GenerateBands(band_noop);
     }
 }
@@ -690,8 +459,6 @@ namespace video {
 
 void WaitForPresent() {
 #if defined(OGC_PROFILER)
-    // Controller polling: L (unused by the game) edge-triggers a profiler reset.
-    // Edge detection via prevHeld so a held button fires once.
     static u32 prevHeld = 0;
     PAD_ScanPads();
     const u32 held = PAD_ButtonsHeld(0);
@@ -702,14 +469,12 @@ void WaitForPresent() {
     render_gx();
 
 #if defined(OGC_PROFILER)
-    // Profiler overlay on top, in screen-space.
     GX_LoadProjectionMtx(proj_screen, GX_ORTHOGRAPHIC);
     GX_SetScissor(0, 0, fbW, efbH);
     gx_mode_flat();
     draw_overlay();
 #endif
 
-    // Copy this frame into the back buffer, show it, then flip for next frame.
     GX_DrawDone();
     GX_CopyDisp(xfb[fbi], GX_TRUE);
     GX_Flush();
@@ -719,41 +484,19 @@ void WaitForPresent() {
     VIDEO_WaitVSync();
     fbi ^= 1;
 
-    /* No IRQs permitted post-frame; discard anything still queued from this
-     * frame's render before NMI enqueues for the next one. */
     irq::irqPendingValid = false;
     nmi_vector();
 }
 
 }   // namespace video
 
-// init()/post() are the global library lifecycle hooks the RESET macro expands
-// to (declared in interrupts.hpp), so they live at global scope -- not inside
-// namespace video.
 void irq::init() {
     VIDEO_Init();
     rmode = VIDEO_GetPreferredMode(nullptr);
 
-    // THE CONSOLE'S OWN PREFERRED MODE, WHATEVER IT IS. This used to override a
-    // 50Hz preferred mode onto TVNtsc480IntDf, because the NES core ticks
-    // exactly one game frame per VBlank (see WaitForPresent: VIDEO_WaitVSync()
-    // then nmi()), so the game's logic rate IS the refresh rate -- and at 50Hz a
-    // ~60Hz game ran ~17% slow, reading as input/scroll lag on a console nowhere
-    // near CPU-bound.
-    //
-    // THAT IS WHAT demo::Framerated NOW FIXES, which removes the override's
-    // whole justification: ::video::DetectRefresh below measures the refresh
-    // that was actually configured and every framerate-dependent value selects
-    // its 50Hz or 60Hz half from it, so a 50Hz display is correct rather than
-    // slow. Honouring the console is right in both directions -- a native PAL
-    // TV shows 50Hz and the game is tuned for 50Hz, an EURGB60 console shows
-    // 60Hz and the game is tuned for 60Hz.
-    //
-    // AND THE OVERRIDE CARRIED A RISK THAT IS NOW UNPAID-FOR. Forcing an NTSC
-    // mode is fine under Dolphin, which renders any mode regardless of region,
-    // but on real hardware a PAL TV that cannot take 60Hz gets no picture or a
-    // rolling one -- the override needed an EURGB60/component-cable guard that
-    // was never written. Not forcing anything needs no guard.
+    // Whatever mode the console prefers, in both directions: demo::Framerated
+    // scales off DetectRefresh below, and forcing NTSC on a 50Hz-only PAL TV
+    // would need an EURGB60 guard that was never written.
 
     xfb[0] = MEM_K0_TO_K1(SYS_AllocateFramebuffer(rmode));
     xfb[1] = MEM_K0_TO_K1(SYS_AllocateFramebuffer(rmode));
@@ -764,7 +507,6 @@ void irq::init() {
     VIDEO_WaitVSync();
     if (rmode->viTVMode & VI_NON_INTERLACE) VIDEO_WaitVSync();
 
-    // --- GX init -----------------------------------------------------------
     gp_fifo = memalign(32, FIFO_SIZE);
     memset(gp_fifo, 0, FIFO_SIZE);
     GX_Init(gp_fifo, FIFO_SIZE);
@@ -788,9 +530,6 @@ void irq::init() {
     GX_CopyDisp(xfb[fbi], GX_TRUE);
     GX_SetDispCopyGamma(GX_GM_1_0);
 
-    // 2D: no depth test. Tiles/sprites REPLACE the raster colour with the CI4
-    // texture and alpha-test colour-0 for NES transparency (asserted per-frame
-    // by gx_mode_tiles). No blend.
     GX_SetZMode(GX_FALSE, GX_ALWAYS, GX_FALSE);
     GX_SetColorUpdate(GX_TRUE);
     GX_SetBlendMode(GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_CLEAR);
@@ -809,56 +548,18 @@ void irq::init() {
     GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLORNULL);
     GX_SetTevOp(GX_TEVSTAGE0, GX_REPLACE);
 
-    // World columns needed to fill the real TV width when the fixed 30 rows
-    // map 1:1 to the real TV height -- i.e. render more world instead of
-    // stretching a 256px image over a wider screen (see video::viewport_tx()
-    // in video.hpp). Aligned to a multiple of 4 tiles (32px attribute grid),
-    // matching the SDL LANDSCAPE desktop formula. Derived from the same
-    // rmode->fbWidth/efbHeight pair GX_SetViewport above already uses, so the
-    // projection below stays self-consistent regardless of the actual TV mode.
-    //
-    // On a 16:9 display those framebuffer pixels are NOT square: the TV
-    // stretches rmode->fbWidth across 16/9 of the picture height instead of
-    // 4/3 of it, so one framebuffer pixel is 4/3 as wide as it is tall. The
-    // width the viewport actually has to cover, measured in square pixels, is
-    // therefore fbWidth * (16/9)/(4/3) == fbWidth * 4/3. Nothing about VI or
-    // the EFB changes -- this is ordinary anamorphic widescreen, the same
-    // squeeze a GameCube-era 16:9 mode has always been; the only difference is
-    // that the camera is wider so the stretch lands back on square pixels.
-    //
-    // Worked through for the ordinary 480-line modes (fbWidth 640,
-    // efbHeight 480, so ogc_scale 2): 4:3 gives (640/2)>>3 == 40 columns, a
-    // 320x240 world that IS 4:3; 16:9 gives ((640*4/3)/2)>>3 == 53, aligned
-    // down to 52, a 416x240 world that is ~16:9 -- the same 52-tile widescreen
-    // viewport TARGET_NX and the Wii U path use, arrived at independently.
-    //
-    // BOTH are resolved here, not just the one in effect, because a GameCube
-    // can switch between them mid-run (video::ogc::SetWidescreen) and the
-    // switch must not have to redo any of this.
+    // A 16:9 framebuffer pixel is 4/3 as wide as it is tall, so the viewport has
+    // to cover fbWidth * 4/3 square pixels. Aligned to the 32px attribute grid.
     const u32 ogc_scale = rmode->efbHeight >= 240 ? rmode->efbHeight / 240 : 1;
     world_tx_4_3  = static_cast<u16>(((rmode->fbWidth / ogc_scale) >> 3) & ~3u);
     world_tx_16_9 = static_cast<u16>(((((rmode->fbWidth * 4u) / 3u) / ogc_scale) >> 3) & ~3u);
 
-    // Which one this run starts on. The Wii knows, and cannot be overridden --
-    // video::ogc::SetWidescreen is GameCube-only, so this is settled for the
-    // whole run. The GameCube starts 4:3 and waits to be told (see that
-    // function's own comment).
-    //
-    // CONF_GetAspectRatio returns s32, not the enum: a SYSCONF read failure is
-    // a NEGATIVE error code, not CONF_ASPECT_4_3. Comparing against
-    // CONF_ASPECT_16_9 rather than against 4:3 is therefore deliberate -- it
-    // makes any error fall back to 4:3, the safe direction, since a 4:3 image
-    // on a widescreen set is merely pillarboxed whereas the reverse is
-    // horizontally squashed.
 #if defined(TARGET_WII)
     widescreen_now = CONF_GetAspectRatio() == CONF_ASPECT_16_9;
 #else
     widescreen_now = false;
 #endif
 
-    // Sets ogc_world_tx and builds proj_nes from it. Identity modelview below;
-    // the profiler's screen-space projection follows the framebuffer instead,
-    // so an aspect change never touches it and it is built once, here.
     apply_aspect();
 #if defined(OGC_PROFILER)
     guOrtho(proj_screen, 0, rmode->efbHeight - 1, 0, rmode->fbWidth - 1, 0, 300);
@@ -871,50 +572,27 @@ void irq::init() {
     efbH = rmode->efbHeight;
     fbW  = rmode->fbWidth;
 
-    // video::vram_bytes() (video.hpp) sizes this for ::ppu::nametableCount
-    // physical, viewport-sized nametables -- the NES-hardware-equivalent 2
-    // pages/0x800 bytes when ogc_world_tx resolves to 32 or less (e.g. a
-    // tiny/unusual TV mode), scaling up with a wider TV's viewport (see
-    // ::emu::ComputeNtGeometry in draw_bg_band below).
-    //
-    // Sized for the WIDER of the two aspects, whichever is in effect right now,
-    // so video::ogc::SetWidescreen never has to reallocate: emu::InitMemory is
-    // a plain malloc (src/emu/ppu.cpp), a second call would leak the first, and
-    // every pointer the game holds into VideoRAM would move under it. The cost
-    // of the headroom is the difference between a 52-column and a 40-column
-    // plane -- under a kilobyte on the ordinary 480-line modes -- and it buys a
-    // switch that cannot fail. A Wii pays that same headroom for a switch it
-    // can never make (SetWidescreen is GameCube-only), which is cheaper than
-    // maintaining a second path for it. ogc_world_tx is parked at the wide
-    // width just long enough for vram_bytes() to read it, since that is the one
-    // place the page-layout formula lives.
+    // Sized for the wider aspect so SetWidescreen never reallocates:
+    // emu::InitMemory is a plain malloc, and every pointer into VideoRAM would
+    // move under the game.
     const u16 tx_now = ogc_world_tx;
     ogc_world_tx = world_tx_16_9 > world_tx_4_3 ? world_tx_16_9 : world_tx_4_3;
     const unsigned vram = video::vram_bytes();
     ogc_world_tx = tx_now;
     emu::InitMemory(vram);
 
-    // --- GX-NATIVE resources ----------------------------------------------
     for (int i = 0; i < ATLAS_SLOTS; i++) {
         chr_atlas[i] = static_cast<u8 *>(memalign(32, ATLAS_W * ATLAS_H / 2));
         GX_InitTexObjCI(&chrTexObj[i], chr_atlas[i], ATLAS_W, ATLAS_H, GX_TF_CI4,
                         GX_CLAMP, GX_CLAMP, GX_FALSE, GX_TLUT0);
         GX_InitTexObjFilterMode(&chrTexObj[i], GX_NEAR, GX_NEAR);
     }
-    // Bake slot 0 from the boot bank state; the ring hands out slot 1 next, so
-    // this one survives for as long as its generation stays live.
     build_chr_atlas(0);
     atlas_cur  = 0;
     atlas_ring = 1;
 
     ogc_input_init();
 
-    // See the wii_*_callback comment above: without these, a Wii title never
-    // answers IOS/STM's power-down or reset request, which is what leaves
-    // Dolphin stuck on "Shutting Down" for the Wii build. SYS_SetResetCallback
-    // exists on GameCube too (it's the physical Reset button), so it's
-    // registered unconditionally; it's a no-op for this bug since GC has no
-    // such handshake to hang on.
     SYS_SetResetCallback(wii_reset_callback);
 #ifdef TARGET_WII
     SYS_SetPowerCallback(wii_power_callback);
@@ -922,67 +600,31 @@ void irq::init() {
 #endif
 
 #if defined(OGC_PROFILER)
-    // Start the statistical PC sampler. MUST run here -- init() executes on the
-    // main thread, whose KThread* the sampler reads PCs from.
     prof_init();
 #endif
 }
 
 void irq::post() {
-    // libogc has no teardown counterpart to VIDEO_Init/GX_Init that a homebrew
-    // app needs at exit; the loader resets the machine. Free the scratch buffers
-    // so a clean shutdown doesn't leak (mostly documentary on a console).
     for (u8 *a : chr_atlas) free(a);
     free(gp_fifo);
 
 #ifdef TARGET_WII
-    // This is the other half of the wii_*_callback registration in init():
-    // the callbacks only set `quit` so the game loop unwinds; the actual
-    // SYS_ResetSystem call is the acknowledgement IOS/STM (and, in Dolphin,
-    // the Stop button) is waiting on. Without it the request is never
-    // answered and Dolphin hangs on "Shutting Down" instead of closing.
-    //
-    // Three exits, three correct answers (see the ExitIntent comment above):
     if (exit_intent == EXIT_POWEROFF) {
-        // The user pressed a power button. Honour it literally.
         SYS_ResetSystem(SYS_POWEROFF, 0, 0);
     } else if (!loader_stub_present()) {
-        // Installed channel: no loader to fall back into, so return to the
-        // System Menu ourselves. This also answers the STM reset request.
+        // Installed channel: no loader stub to fall back into.
         SYS_ResetSystem(SYS_RETURNTOMENU, 0, 0);
     }
-    // Otherwise an HBC-style loader stub is live at 0x80001800: fall through
-    // and let the ordinary return-from-main path jump into it, which puts the
-    // user back in the launcher they started from.
 #endif
 }
 
 /**
- * @brief Strong override of the weak src/all/video.cpp default: TIMES the
- *        vsync cadence instead of reading the video mode's region field.
+ * @brief Strong override of src/all/video.cpp's weak default: times the vsync
+ *        cadence rather than reading the mode's region field.
  *
- * THIS IS THE BACKEND PAL60 EXISTS ON, and the reason the refresh cannot be a
- * build-time fact here. irq::init() above takes whatever mode the console
- * prefers, and a European console can prefer either: 576i at 50Hz, or EURGB60
- * at 60Hz if the player has a component cable and asked for it. Both come out
- * of one build, so one build has to be able to tell them apart.
- *
- * Measuring the cadence does that without enumerating which VI formats are
- * 60Hz -- VI_NTSC, VI_MPAL, VI_EURGB60 and VI_DEBUG all are, VI_PAL and
- * VI_DEBUG_PAL are not -- which is one more table to keep correct. The clock
- * needs no maintenance.
- *
- * MUST RUN AFTER irq::init(), which is where VIDEO_Configure is called -- the
- * ::RESET macro (interrupts.hpp) sequences it that way.
- *
- * Eight intervals rather than one: VIDEO_WaitVSync returns on a retrace that
- * may be most of a frame away, so the first interval is short by an arbitrary
- * amount. Averaging over eight dilutes that to an eighth, and the gap being
- * measured -- 16.7ms vs 20.0ms, a 20% difference -- is far wider than what is
- * left. Costs ~0.15s of boot once.
- *
- * The threshold is 18.3ms, between the two, expressed in microseconds off the
- * PowerPC timebase (gettime/ticks_to_microsecs, lwp_watchdog.h).
+ * EURGB60 means one European build can come up at either rate, so this cannot
+ * be a build-time fact. Eight intervals, since WaitForVSync's first return is
+ * an arbitrary part of a frame away. Must run after irq::init() configures VI.
  */
 bool video::DetectRefresh() {
     constexpr u32 kIntervals = 8;
@@ -995,6 +637,6 @@ bool video::DetectRefresh() {
     const u32 perFrameUs =
         static_cast<u32>(ticks_to_microsecs(end - start) / kIntervals);
 
-    // 18300us: between 60Hz's 16667us and 50Hz's 20000us.
+    // Between 60Hz's 16667us and 50Hz's 20000us.
     return perFrameUs > 18300;
 }

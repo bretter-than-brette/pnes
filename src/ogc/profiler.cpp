@@ -1,39 +1,27 @@
 /**
  * @file profiler.cpp
- * @brief On-target statistical PC sampler for the libogc (GameCube + Wii) backend.
+ * @brief On-target statistical PC sampler for the libogc backend.
  *
- * Dolphin reports the emulator at 100% speed with huge headroom, yet the game
- * still hitches -- which means the cost is episodic CPU work somewhere in the
- * per-frame game logic, not a graphics or throughput problem. To find *where*
- * (including code we haven't manually bracketed), this samples the program
- * counter of the main thread at ~10 kHz and bins the hits into a histogram. The
- * hottest addresses are read back by the video backend and drawn as a hex+bar
- * overlay; resolve the hex offline against demo.elf with tools/profsym.sh.
+ * Dolphin reports 100% speed with headroom while the game still hitches, which
+ * means the cost is episodic CPU work in the game logic rather than a throughput
+ * problem. This samples the main thread's PC at ~10 kHz and bins the hits; the
+ * video backend draws the hottest addresses as a hex+bar overlay, resolved
+ * offline with tools/profsym.sh.
  *
- * Mechanism (modern libogc is built on the `tuxedo` microkernel):
- *   - Every thread's saved CPU context lives at the head of its TCB
- *     (`KThread::ctx`, a `PPCContext` whose first word is the interrupted PC).
- *   - We capture the main thread's `KThread*` at init (on the main thread), then
- *     run a higher-priority sampler thread that sleeps ~100us, wakes (preempting
- *     main, so the scheduler has just saved main's PC into `ctx.pc`), reads that
- *     PC and records it.
- *   - We only count a sample when main is `KTHR_STATE_RUNNING` (runnable). While
- *     it is `KTHR_STATE_WAITING` (blocked in VIDEO_WaitVSync) its saved PC is
- *     stale idle time, which we skip -- so the histogram reflects actual on-CPU
- *     work, not the frame's spare headroom.
+ * Mechanism (libogc's tuxedo microkernel): a thread's saved context sits at the
+ * head of its TCB, so a higher-priority sampler thread wakes -- preempting main,
+ * whose PC the scheduler has just saved -- and reads it. Samples are only counted
+ * while main is RUNNING; blocked in VIDEO_WaitVSync its saved PC is stale idle
+ * time, so the histogram reflects on-CPU work rather than spare headroom.
  *
- * This touches no exception vectors and uses only public tuxedo structs, so it
- * cannot destabilise libogc's own timing/threading. It is OGC-only and never
- * compiled into the NES target.
+ * Touches no exception vectors and uses only public tuxedo structs.
  */
 #include "internal.hpp"
 #include "profiler.hpp"
 
-// Development tool only: compiled into Debug .dols (gc-debug/wii-debug), where
-// CMake defines OGC_PROFILER. Release builds get an empty translation unit, so
-// the sampler thread and histogram never ship. The matching call sites in
-// video.cpp are gated the same way; profiler.hpp declares the API unconditionally
-// (a header has no config knowledge), but with OGC_PROFILER off nothing calls it.
+// Debug builds only, where CMake defines OGC_PROFILER; release gets an empty
+// translation unit. profiler.hpp declares the API unconditionally, since a
+// header has no config knowledge.
 #if defined(OGC_PROFILER)
 
 #include <tuxedo/thread.h>
@@ -42,9 +30,9 @@
 
 namespace {
 
-// Open-addressed histogram: power-of-two slots, linear probe, drop-on-full.
-// Hot addresses are sampled early and often, so they land before the table
-// fills; only cold late-comers are dropped, which is fine since we show top-N.
+// Open-addressed, power-of-two, linear probe, drop-on-full: hot addresses are
+// sampled early and often, so only cold late-comers are dropped -- fine for a
+// top-N display.
 constexpr int   HASH_SLOTS = 8192;
 constexpr u32   SAMPLE_US  = 100;          // ~10 kHz sampling
 
@@ -75,8 +63,6 @@ void record(u32 pc) {
 sptr sampler_fn(void*) {
     for (;;) {
         KThreadSleepUs(SAMPLE_US);
-        // Only main's *runnable* time is real work; its blocked-on-VSync time
-        // would otherwise dominate (we have ~10x headroom) and bury the hotspots.
         if (g_main->state == KTHR_STATE_RUNNING) {
             g_total++;
             record(g_main->ctx.pc);
@@ -93,16 +79,12 @@ void prof_init() {
     g_main = KThreadGetSelf();             // must be called on the main thread
     g_hist = static_cast<Slot*>(memalign(32, HASH_SLOTS * sizeof(Slot)));
     prof_reset();
-    // Priority below main's 0x3f (numerically lower == higher priority) so the
-    // sampler preempts the game logic; its per-tick work is negligible.
     KThreadPrepare(&g_sampler, sampler_fn, nullptr,
                    g_sampler_stack + sizeof(g_sampler_stack), 0x10);
     KThreadResume(&g_sampler);
 }
 
 void prof_reset() {
-    // Lock-free clear: a sample racing the wipe is at worst miscounted once,
-    // which is harmless and avoids perturbing the timing we are measuring.
     memset(g_hist, 0, HASH_SLOTS * sizeof(Slot));
     g_total = g_idle = g_drop = 0;
 }

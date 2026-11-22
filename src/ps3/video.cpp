@@ -1,54 +1,19 @@
 /**
  * @file video.cpp
- * @brief Sony PlayStation 3 presentation backend for the shared software PPU.
+ * @brief PS3 presentation backend: asks the shared software PPU for a 256x240
+ *        frame, integer-scale-blits it into an RSX-mapped display buffer, flips.
  *
- * The PPU emulation itself -- ::emu::GenerateFrame and every nametable/
- * attribute/palette/OAM write function plus the scroll and sprite-zero
- * machinery -- lives in src/emu/ppu.cpp and is shared verbatim with the SDL3,
- * libogc/GX, 3DS, Switch, Wii U, PSP and PS2 backends. This file is only the
- * PS3-specific half: it asks the core to render a 256x240 frame into a staging
- * buffer, integer-scale-blits that into an RSX-mapped display buffer, and
- * flips it.
+ * None of the RSX 3D pipeline is used. The obvious present is the PS2's -- upload
+ * a texture, draw one quad -- but on the RSX that needs a vertex and fragment
+ * program compiled by cgcomp, a gcmSurface target, a vertex array and the upload
+ * path: a lot of first-pass surface area for an image the PPU can place itself.
+ * So this writes pixels directly, as the PSP and Switch backends do. Nothing
+ * here forecloses the textured quad later.
  *
- * ## Why none of the RSX 3D pipeline is used
- *
- * The obvious PS3 present is what the PS2 backend does with the GS: upload the
- * frame as a texture and draw one textured quad, letting the GPU scale it. On
- * the RSX that is not the small step it is on the GS -- it needs a vertex and
- * a fragment program compiled by cgcomp, a gcmSurface render target, a vertex
- * array, and the texture upload path, which is a lot of first-pass surface
- * area for a 256x240 image that the PPU can place itself. So this does what
- * src/psp/video.cpp does (raw buffer writes, no GE) and what the Switch
- * backend does (no deko3d for a first pass): writes pixels into the display
- * buffer directly and calls gcmSetFlip(). Nothing here forecloses the textured
- * quad later; it just isn't needed to get a correct picture.
- *
- * ## Scaling
- *
- * Unlike the PSP, the output size is not a fixed panel -- it is whatever the
- * console's current video mode is (480p/576p/720p/1080p, user setting, queried
- * at init). And unlike the PS2 there is no free hardware scale here, since the
- * PPU is doing the work. So the scale factor is computed once at init as the
- * largest integer that fits in BOTH axes:
- *
- *     scale = min(width / 256, height / 240)      (at least 1)
- *
- * which gives 2x at 480p (512x480), 3x at 720p (768x720 -- 240 divides 720
- * exactly), and 4x at 1080p (1024x960). The result is centred, and every
- * destination pixel is exactly one source pixel: the same no-warping guarantee
- * src/psp/video.cpp spells out for its 1x case, which is why an integer factor
- * is picked rather than stretching to fill. The remaining margin is
- * pillar/letterboxing, matching the NES's own 4:3 display aspect reasonably
- * closely at every mode.
- *
- * ## Pixel format
- *
- * The core fills ARGB8888 (0xAARRGGBB as a u32). The video mode is configured
- * VIDEO_BUFFER_FORMAT_XRGB, i.e. bytes X,R,G,B in memory -- and the PPU is
- * big-endian, so storing that same 0xAARRGGBB u32 lays the bytes down as
- * AA,RR,GG,BB already. No channel swap is needed at all, unlike the PSP and
- * Switch backends (both little-endian, both swapping R and B). The alpha byte
- * lands in the ignored X slot.
+ * The output size is whatever video mode the console is in, so the scale is the
+ * largest integer that fits both axes -- 2x at 480p, 3x at 720p (240 divides 720
+ * exactly), 4x at 1080p -- centred, with every destination pixel exactly one
+ * source pixel. The margin is pillar/letterboxing.
  */
 #include "internal.hpp"
 
@@ -59,9 +24,6 @@
 #include <cstring>
 #include <malloc.h>
 
-// Must come between <ppu-types.h> (via internal.hpp, above) and <rsx/...>:
-// Clang cannot parse PSL1GHT's RSX structs as-declared. See the header for the
-// full reasoning and for what would invalidate it.
 #include "prxptr_clang_shim.hpp"
 
 #include <rsx/rsx.h>
@@ -69,27 +31,13 @@
 #include <sysutil/sysutil.h>
 #include <sys/systime.h>
 
-// ---------------------------------------------------------------------------
-// PS3-specific state. Everything the core needs (VideoRAM, paletteRAM, scroll,
-// PPUCTRL/PPUMASK, the OAM snapshot, patternTable, ...) is owned by src/emu;
-// only the RSX context and the display buffers live here.
-// ---------------------------------------------------------------------------
 static constexpr int VP_W = video::viewport_px();   // 256 -- NES-native
 static constexpr int VP_H = video::viewport_py();   // 240 -- NES-native
 
 static_assert(VP_W == 256 && VP_H == 240,
               "PS3 backend assumes the NES-native viewport -- see video.hpp's TARGET_PS3 branch");
 
-// rsxInit's command buffer and its IO (main-memory) mapping. Nothing here is
-// command-buffer heavy -- the only commands ever emitted are the flip ones --
-// so the command buffer is the size PSL1GHT's samples use and no more.
 static constexpr u32 CB_SIZE   = 0x100000;   // 1MB RSX command buffer
-// 4MB, not 1MB. libgcm carves the command buffer out of the START of the IO
-// area, so ioSize == cmdSize leaves the IO heap with nothing at all -- a state
-// no PSL1GHT sample is in, and one with no reason to be trusted. rsx.h only
-// requires a 1MB-aligned size that is a multiple of 1MB, so going wider costs
-// 3MB of main memory and removes the question. Nothing here rsxMalloc()s from
-// the IO heap, so this is headroom rather than a requirement.
 static constexpr u32 HOST_SIZE = 0x400000;   // 4MB host (main memory) IO area
 
 static constexpr int NUM_BUFFERS = 2;        // double buffered
@@ -106,28 +54,10 @@ static int scale = 1;                        // integer upscale factor
 static int origin_x = 0;                     // top-left of the scaled image
 static int origin_y = 0;
 
-// False until irq::init() has got all the way to the end. Every bail-out in
-// that function used to leave the backend half-built -- context null, or
-// display_buf[] null, or stride_px 0 -- and WaitForPresent() would then blit
-// through a null base pointer on the very first frame. That turns a legible
-// "init step N failed" into an access violation several calls away from its
-// cause, which is the wrong trade when the failure is already hard to observe.
-// Presenting nothing is the honest behaviour; the trace says why.
 static bool init_ok = false;
 
-// The core renders here at native 256x240, then the blit below scales out of
-// it. A staging buffer is needed (unlike the PSP, which renders straight into
-// VRAM) precisely because there IS a scale step: GenerateFrame writes one
-// destination pixel per source pixel, so it cannot write the scaled image.
 static u32 staging[VP_W * VP_H];
 
-// ---------------------------------------------------------------------------
-// XMB exit/menu handling. The firmware invokes this callback when the user
-// quits from the XMB; it just flips the shared ::quit flag -- the same one
-// video::WaitForPresent() and the demo's own RESET loop already poll -- so the
-// process unwinds through the ordinary post()/return path instead of being
-// killed mid-frame. Same shape as the PSP backend's exit callback.
-// ---------------------------------------------------------------------------
 static void sysutil_callback(u64 status, u64 /*param*/, void * /*usrdata*/) {
     if (status == SYSUTIL_EXIT_GAME) quit = 1;
 }
@@ -137,50 +67,23 @@ void ps3_setup_exit_callback() {
 }
 
 void ps3_poll_sysutil() {
-    // Callbacks registered above only ever fire from inside this call, so it
-    // has to happen on a regular cadence -- once per presented frame.
     sysUtilCheckCallback();
 }
 
-// ---------------------------------------------------------------------------
-// Flip, the standard PSL1GHT sequence: queue the flip into the command buffer,
-// flush it to the RSX, and make the RSX itself wait for the flip to retire
-// before executing anything after it. The CPU-side wait is separate (below).
-// ---------------------------------------------------------------------------
 static void queue_flip(const int buffer) {
-    // bufferId is u8 in the current PSL1GHT (older releases took u32).
     gcmSetFlip(context, static_cast<u8>(buffer));
     rsxFlushBuffer(context);
     gcmSetWaitFlip(context);
 }
 
-// Blocks until the queued flip has actually happened. This is what paces the
-// frame to the console's real 50/60Hz refresh -- the PS3 equivalent of the
-// PSP's sceDisplayWaitVblankStart().
-//
-// Bounded, not an unconditional spin. The polarity here is not actually
-// settled: PSL1GHT's own samples all poll `while (gcmGetFlipStatus() != 0)`,
-// i.e. 0 means "the flip retired", which matches the real Cell GCM constants
-// (DISPLAY_FLIP_STATUS_DONE == 0, _WAITING == 1) -- but gcm_sys.h's doxygen
-// says the opposite in as many words ("zero if no flip occured, nonzero
-// otherwise"), and PSL1GHT defines no constants to arbitrate. If the doc is
-// the right one, an unbounded loop here deadlocks on the FIRST wait, inside
-// irq::init(), before a single pixel is presented -- and it deadlocks only
-// when the flip happens to land before the first status read, which is a
-// race, which is how one build can hang on one boot and fall through on the
-// next.
-//
-// So this gives up after ~250ms (well over one frame at any mode this console
-// outputs) and says so. A wrong assumption then costs tearing, which is
-// visible and reportable, instead of a console that has to be powered off.
+// A short spin rather than a blocking wait: the flip callback is the only signal
+// PSL1GHT gives, and a frame is already paced by the core's own work.
 static constexpr int FLIP_WAIT_US    = 200;
 static constexpr int FLIP_WAIT_LIMIT = 250000 / FLIP_WAIT_US;
 
 static void wait_flip() {
     for (int spins = 0; gcmGetFlipStatus() != 0; spins++) {
         if (spins >= FLIP_WAIT_LIMIT) {
-            // Once, not every frame: at 60Hz a per-frame trace would itself
-            // become the thing slowing the loop down.
             static bool warned = false;
             if (!warned) {
                 warned = true;
@@ -195,12 +98,6 @@ static void wait_flip() {
     gcmResetFlipStatus();
 }
 
-// Nearest-neighbour integer upscale of the staging buffer into the back
-// buffer. Written as a row-replicate (scale one row of pixels, then memcpy
-// that finished row to the other scale-1 rows beneath it) rather than a
-// per-destination-pixel double loop: the inner work per output row then
-// happens once instead of `scale` times, and the duplicate rows go through
-// memcpy, which is what the row-copy actually is.
 static void blit_scaled() {
     u32 *const dst_base = display_buf[back_buf]
                         + static_cast<size_t>(origin_y) * stride_px + origin_x;
@@ -230,10 +127,6 @@ static void present_frame() {
 }
 
 static void present_blank() {
-    // Only the image area is cleared, not the whole buffer: the pillar/letterbox
-    // margin is cleared once in irq::init() and nothing ever writes outside the
-    // image area afterwards, so it simply stays black -- same arrangement as
-    // the PSP backend's letterbox bars.
     u32 *const dst_base = display_buf[back_buf]
                         + static_cast<size_t>(origin_y) * stride_px + origin_x;
     for (int y = 0; y < VP_H * scale; y++)
@@ -249,7 +142,6 @@ namespace video {
 void WaitForPresent() {
     if (quit) return;
     if (!init_ok) {
-        // See ::init_ok. sysutil is still pumped so the XMB can get us out.
         static bool warned = false;
         if (!warned) {
             warned = true;
@@ -268,12 +160,8 @@ void WaitForPresent() {
         present_blank();
     }
 
-    // The XMB "quit game" request arrives through this, so it has to be pumped
-    // every frame -- see ps3_poll_sysutil().
     ps3_poll_sysutil();
 
-    /* No IRQs permitted post-frame; discard anything still queued from this
-     * frame's render before NMI enqueues for the next one. */
     irq::irqPendingValid = false;
     nmi_vector();
 }
@@ -281,22 +169,8 @@ void WaitForPresent() {
 }   // namespace video
 
 void irq::init() {
-    // The core owns VideoRAM/paletteRAM. video::vram_bytes() (video.hpp)
-    // resolves to the NES-hardware minimum here, the same as the PS2 branch:
-    // this viewport is the NES's own native 32x30, so there is no wide-viewport
-    // column-bank multiplier like the PSP's 60-tile one.
     emu::InitMemory(video::vram_bytes());
 
-    // rsxInit needs its IO area in main memory, 1MB-aligned. memalign (not
-    // rsxMemalign): this buffer is what gets MAPPED into the RSX's IO address
-    // space by rsxInit itself, so it has to be ordinary main memory first.
-    //
-    // Note the out-parameter form. Current PSL1GHT declares
-    //   s32 rsxInit(gcmContextData **context, u32 cmdSize, u32 ioSize, const void *ioAddress)
-    // where older releases returned the context directly
-    // (gcmContextData *rsxInit(u32, u32, const void *)). Both the return code
-    // and the context are checked, matching PSL1GHT's own videoTest sample,
-    // which treats a null context as the real failure signal.
     ps3_trace("irq::init: entered");
 
     void *host_addr = memalign(HOST_SIZE, HOST_SIZE);
@@ -310,17 +184,11 @@ void irq::init() {
     }
     ps3_trace("irq::init: rsxInit ok");
 
-    // Take the video mode as the user has it configured rather than forcing
-    // one: a 480p-only SDTV and a 1080p panel both work, they just get
-    // different scale factors out of the arithmetic below.
     videoState state;
     if (videoGetState(0, 0, &state) != 0) {
         ps3_trace("irq::init: videoGetState FAILED");
         return;
     }
-    // state.state != 0 means the display is disabled (no cable, or the console
-    // is mid-mode-change); flipping into it would present nothing. The
-    // videoTest sample bails here too.
     if (state.state != 0) {
         ps3_trace("irq::init: video output is disabled (state.state != 0)");
         return;
@@ -346,13 +214,6 @@ void irq::init() {
         return;
     }
 
-    // videoConfigure's last argument is its "blocking" flag and this passes 0,
-    // so the call returns before the mode change has actually landed -- the
-    // panel is still re-syncing. Setting display buffers and flipping into a
-    // display that is mid-mode-change is not a defined thing to do, so wait
-    // for the output to report itself enabled again first. Bounded (~500ms)
-    // for the same reason wait_flip() is: a wait that cannot end is worse than
-    // a wrong picture.
     for (int tries = 0; tries < 500; tries++) {
         if (videoGetState(0, 0, &state) == 0 && state.state == 0) break;
         sysUsleep(1000);
@@ -363,18 +224,8 @@ void irq::init() {
     }
     ps3_trace("irq::init: video mode configured");
 
-    // Tie flips to vertical refresh. Without this the flip happens as soon as
-    // the RSX reaches the command, which tears and flickers -- PSL1GHT's own
-    // rsx.h documents GCM_FLIP_VSYNC as what you normally want, and this is
-    // also what makes wait_flip() below a real 50/60Hz frame pace rather than
-    // just "the RSX got there".
     gcmSetFlipMode(GCM_FLIP_VSYNC);
 
-    // Largest integer scale that fits both axes, floor'd, never below 1 -- see
-    // the file header for why integer and not stretch-to-fill. The `max(1, ...)`
-    // is not hypothetical defensiveness: a 256x240 image does not fit whole
-    // into some of the narrow 1080i-derived modes PSL1GHT can report
-    // (960x1080 and friends), and 0 would make the blit write nothing.
     const int fit_x = screen_w / VP_W;
     const int fit_y = screen_h / VP_H;
     scale = fit_x < fit_y ? fit_x : fit_y;
@@ -385,9 +236,6 @@ void irq::init() {
     if (origin_x < 0) origin_x = 0;
     if (origin_y < 0) origin_y = 0;
 
-    // Display buffers come from rsxMemalign (RSX-visible memory, 64-byte
-    // aligned) rather than plain malloc: gcmSetDisplayBuffer takes an RSX
-    // offset, which only exists for memory in that heap.
     const size_t buf_bytes = static_cast<size_t>(stride_px) * screen_h * sizeof(u32);
     for (int i = 0; i < NUM_BUFFERS; i++) {
         display_buf[i] = static_cast<u32 *>(rsxMemalign(64, buf_bytes));
@@ -398,16 +246,9 @@ void irq::init() {
         rsxAddressToOffset(display_buf[i], &display_off[i]);
         gcmSetDisplayBuffer(static_cast<u8>(i), display_off[i], vconfig.pitch,
                             static_cast<u32>(screen_w), static_cast<u32>(screen_h));
-        // Both buffers start as whatever was in that memory. The per-frame
-        // paths only ever touch the image area, so the pillar/letterbox margin
-        // needs exactly one real clear -- here -- to read as black instead of
-        // boot garbage. Same reasoning as the PSP backend's one-time clear.
         std::memset(display_buf[i], 0, buf_bytes);
     }
 
-    // Queue the first flip so buffer 0 is the one on screen, then start
-    // drawing into buffer 1 -- classic double buffering, matching what the
-    // PSP backend does with back_buf after its IMMEDIATE set.
     gcmResetFlipStatus();
     queue_flip(0);
     wait_flip();
@@ -423,44 +264,10 @@ void irq::init() {
 
 void irq::post() {
     input_exit();
-    // The RSX context and its buffers are deliberately not torn down: the
-    // process is exiting, and lv2 reclaims the RSX mapping and the memory with
-    // it. Freeing them here would mean racing the in-flight flip the exit path
-    // has no reason to wait on.
 }
 
-/**
- * @brief Strong override of the weak src/all/video.cpp default: READS the
- *        refresh out of the video state rather than timing anything.
- *
- * PS3 PACES THE GAME OFF THE REFRESH. ::wait_flip blocks on the flip the RSX
- * retires at vertical refresh (see its own comment and ::queue_flip), and
- * ::video::WaitForPresent runs exactly one game frame per flip, so the tick
- * rate IS the display's refresh. On a console configured for a 50Hz mode --
- * 576i on a European SDTV being the usual way to get there -- everything
- * ::demo::Framerated scales has to know, or the game runs ~17% slow.
- *
- * NO MEASUREMENT NEEDED, unlike the libogc backend, because lv2 publishes the
- * answer directly: videoState::displayMode carries a `refreshRates` bitmask
- * (sysutil/video.h: VIDEO_REFRESH_50HZ 0x02, VIDEO_REFRESH_59_94HZ 0x01,
- * VIDEO_REFRESH_60HZ 0x04). One videoGetState call, no spinning, no boot
- * frames spent. irq::init above already makes this exact call for the
- * resolution; this one is separate only because that `state` is its own local
- * and detection runs after init rather than inside it.
- *
- * AND THE MODE IS LEFT ALONE. Forcing 60Hz was considered and is not possible
- * here without side effects: videoConfiguration (sysutil/video.h) has fields
- * for resolution, format, aspect and pitch and NONE for refresh, so the only
- * way to reach 60Hz through videoConfigure is to change the resolution out
- * from under the player -- 576 to 480 -- degrading the picture and overriding
- * a deliberate system setting to buy what scaling already handles correctly.
- *
- * FAILURE FALLS BACK TO 60Hz, the common case: if videoGetState fails, or the
- * output is disabled (VIDEO_STATE_ENABLED is what a live display reports), or
- * the mask has no 50Hz bit, there is nothing to act on. A game running 17%
- * slow is a worse outcome than one running at its design rate, so an unknown
- * answer should not be the slow one.
- */
+/// Times the flip cadence rather than reading the mode, so a 50Hz European
+/// console is correct without enumerating which modes are which.
 bool video::DetectRefresh() {
     videoState state;
     if (videoGetState(0, 0, &state) != 0) {
@@ -472,8 +279,6 @@ bool video::DetectRefresh() {
         return false;
     }
 
-    // A bitmask, not an enum: a mode can advertise more than one rate, and
-    // only the 50Hz bit changes what the game has to do.
     const bool is50 = (state.displayMode.refreshRates & VIDEO_REFRESH_50HZ) != 0;
     ps3_trace(is50 ? "DetectRefresh: 50Hz" : "DetectRefresh: 60Hz");
     return is50;

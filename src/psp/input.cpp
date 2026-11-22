@@ -1,21 +1,13 @@
 /**
  * @file input.cpp
- * @brief Controller polling for the Sony PSP backend (pspctrl).
- *
- * Maps the PSP's face buttons/D-pad/analog stick onto the same NES button
- * bitmask the rest of the engine expects (see ::Buttons in input.hpp). A
- * single player is wired for now, so port 2 is always idle. Both the D-pad
- * and the analog stick drive the NES directions (either works); Cross/Circle
- * map to the NES A/B face buttons (Cross as the "confirm" button matches
- * every PSP menu convention), with Start/Select as Start/Select.
+ * @brief Controller polling for the PSP backend (sceCtrl). The analog stick
+ *        drives the NES directions alongside the D-pad.
  */
 #include "internal.hpp"
 #include <pnes/input.hpp>
 
 #include <pspctrl.h>
 
-// Deadzone around the analog stick's 128 centre, matching the loose 25%
-// threshold other digital-stick-fallback backends use.
 static constexpr int STICK_CENTER = 128;
 static constexpr int STICK_DEADZONE = 40;
 

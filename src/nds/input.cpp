@@ -1,19 +1,11 @@
 /**
  * @file input.cpp
- * @brief Controller polling for the Nintendo DS / DSi backend (libnds keypad).
+ * @brief Controller polling for the DS and DSi backend (libnds keypad). One
+ *        player, with X/Y mirrored onto Start/Select so the larger buttons work.
  *
- * Maps the DS buttons onto the same NES button bitmask the rest of the engine
- * expects (see ::Buttons in input.hpp). The DS is a single-player console, so
- * port 2 is always idle. A/B map to the DS A/B face buttons; the DS's tiny
- * Start/Select map straight through, with X/Y mirrored onto Start/Select too so
- * the larger buttons also work.
- *
- * The touch screen fills ::input::click. The DS's two panels are identical
- * 256x192 screens and only the LOWER one is a digitizer, so a touch is always
- * on panel 1 -- and ::video::panel_rect(1) is where that panel sits inside the
- * viewport (video.hpp). Which makes the whole conversion into the viewport
- * pixels ::input::Click reports a single add per axis: libnds already hands
- * back panel pixels, and this panel is 1:1 with the viewport.
+ * Only the lower panel is a digitizer, so a touch is always on panel 1 and
+ * video::panel_rect(1) places it inside the viewport -- which makes the whole
+ * conversion one add per axis, the panels being 1:1 with viewport pixels.
  */
 #include "internal.hpp"
 #include <pnes/input.hpp>
@@ -38,11 +30,6 @@ void input::PollControllers(u8* port1, u8* port2) {
     *port1 = state;
     *port2 = 0;
 
-    // touchRead() reports whether the screen is being touched in its RETURN
-    // value, so there is no KEY_TOUCH test here -- that bit and this call
-    // would be two answers to one question. The position it writes is left
-    // alone when nothing is down (::input::Click::Set ignores it then, keeping
-    // the point the finger lifted from).
     touchPosition touch;
     const bool touching = touchRead(&touch);
 

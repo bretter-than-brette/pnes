@@ -2,38 +2,16 @@
  * @file audio.cpp
  * @brief Music playback for the native Wii U backend (SDL2 audio).
  *
- * Mirrors the desktop audio contract (audio.hpp): the demo registers tracks in
- * its track table and calls Init / TrackPlay / Update.
+ * The music is not loaded from the filesystem: a native title only has a
+ * /vol/content mount when launched with its packaged content, and a bare .rpx
+ * dropped into Cemu has none, so SDL_LoadWAV would silently fail. The build
+ * re-encodes the wav to a small Vorbis OGG and embeds it in the .rpx instead,
+ * which also keeps a 46MB wav out of the artifact.
  *
- * The music is NOT loaded from the filesystem. A native Wii U title only has a
- * /vol/content mount when it is launched with its packaged content (a .wuhb or
- * an unpacked code/content/meta layout); a bare .rpx (e.g. dropped straight into
- * Cemu) has none, and SDL_LoadWAV would silently fail. To play correctly however
- * the title is launched, the build re-encodes the desktop WAV to a small Vorbis
- * OGG (see the wiiu branch of CMakeLists.txt) and #embeds it into the .rpx; this
- * file decodes it with stb_vorbis at startup. This mirrors the web backend's
- * proven OGG path and also shrinks the artifact (the 46MB WAV would otherwise
- * have to ride along uncompressed).
- *
- * Once decoded, playback is identical to the other streaming backends: the OGG
- * is converted once to the AX device format (48k/2ch/s16; SDL handles the rate
- * change and the little-endian -> Espresso big-endian byte swap) and streamed
- * from an SDL audio callback, looping at the track's loop point. The callback
- * runs on SDL's own audio thread, independent of the 60Hz render loop, so
- * Update() is a no-op.
- *
- * SFX (registered via ::audio::SetSfx) are decoded once at init and mixed
- * additively into the same callback, on one of ::N_SFX_VOICES fixed voice
- * slots -- starting a new effect on a busy channel cuts the old one off.
- * Unlike the music track, SFX are NOT #embedded: an app can declare an
- * arbitrary, unbounded SFX table, and #embed needs a literal path known at
- * this file's own compile time, so there's no way to bake an app-defined
- * list into the binary here. Instead each entry's `fp` is looked up at
- * runtime under /vol/content (Vorbis-encoded, same as the embedded music),
- * which requires the title to be launched from its packaged content (.wuhb,
- * or an unpacked code/content/meta layout) -- a bare .rpx dropped straight
- * into Cemu has no /vol/content mount and will simply play no SFX, same as
- * a missing file does today for TrackPlay.
+ * Once decoded, playback is the other streaming backends': converted once to the
+ * AX device format (SDL handles the rate change and the little-endian to
+ * big-endian swap) and streamed from an SDL audio callback on SDL's own thread,
+ * so Update() is a no-op.
  */
 #include "internal.hpp"
 #include <pnes/audio.hpp>
@@ -43,30 +21,19 @@
 #include <cstdlib>
 #include <cstring>
 
-// stb_vorbis decodes the embedded OGG to S16 PCM. Header+impl in one TU; pulled
-// in only here (the include dir is added by the wiiu branch of CMakeLists.txt).
 #define STB_VORBIS_NO_PUSHDATA_API
 #define STB_VORBIS_NO_STDIO
 #include <stb_vorbis.c>
 
-// The Vorbis-encoded music, baked into the .rpx at build time. ffmpeg produces
-// pc_audio.ogg (48k/2ch) into the build tree and CMake puts that dir on the
-// include path, so #embed finds it. GCC 15+ (devkitPPC) supports #embed, the
-// same C23 mechanism the demo already uses for CHR art.
 static const unsigned char ogg_data[] = {
 #embed <pc_audio.ogg>   // resolved via --embed-dir (set in the wiiu CMake branch)
 };
 static constexpr int ogg_len = static_cast<int>(sizeof(ogg_data));
 
-// Device format: 48 kHz, 2ch, signed-16 PCM (the Wii U AX renderer's native
-// rate; SDL converts the decoded OGG into this when we build the track buffer).
 static constexpr int SAMPLE_RATE     = 48000;
 static constexpr int BYTES_PER_FRAME = 2 /*ch*/ * static_cast<int>(sizeof(i16));
 static constexpr int BYTES_PER_SEC   = SAMPLE_RATE * BYTES_PER_FRAME;  // 192000
 
-// audio.hpp declares these for the desktop mixer; the Wii U streams via an SDL
-// callback instead, but define them so the externs resolve if anything refers
-// to them.
 float *audio::pcm_buffer = nullptr;
 u32 audio::pcm_buffer_size = 0;
 
@@ -76,40 +43,19 @@ static u8 *track_data = nullptr;   // whole track, converted to device format
 static u32 track_len  = 0;         // bytes
 static u32 loop_point = 0;         // byte offset to wrap to at end
 static u32 play_pos   = 0;         // current read offset into track_data
-// audio::TrackVolume's setting, as a percentage of full output. Applied in
-// software, in ::audio_callback: the music and the effects share one buffer, so
-// the scale has to land between them.
 static u8  volume     = 100;
 
 static bool playing = false;
 static bool paused  = false;
 
-// One-shot SFX PCM, decoded and converted to the same device format as the
-// track and concatenated into its own buffer.
 struct sfx_runtime_t { u32 offset; u32 length; };   // byte offset/length into sfx_data
 static sfx_runtime_t sfx_info[256];
 static u8            *sfx_data = nullptr;
 
-// The voice-slot count, taken from audio.hpp rather than declared here, so
-// the number this backend allocates is the same one audio::sfxChannels
-// publishes to callers -- see its comment on why it differs from the NES's.
 static constexpr int N_SFX_VOICES = audio::sfxChannels;
-// `paused` is a separate flag and not the absence of `active`, because
-// clearing `active` is already how a voice reports that it FINISHED -- the
-// mixer drops it and the cursor goes with it. A pause has to keep the cursor
-// to be distinguishable from audio::SfxStop.
-// `gain` is this backend's reading of audio.hpp's uninterpreted volume byte: a
-// linear amplitude coefficient, 0 silent and 255 unity. Kept as the byte it
-// arrived as rather than converted up front -- this mixer is integer, so the
-// scale happens per sample in the mix below and a float here would only buy a
-// conversion back.
 struct sfx_voice_t { u32 pos; u32 end; u8 gain; bool active; bool paused; };
 static sfx_voice_t sfx_voices[N_SFX_VOICES];
 
-// Decode one /vol/content-relative Vorbis file into the device format,
-// appending it to sfx_data. Mirrors load_track()'s decode+convert shape but
-// reads from the filesystem (see the file-header note on why SFX can't use
-// #embed) rather than a compiled-in byte array.
 static void load_one_sfx(const u8 i, u32 *running_offset) {
     char path[300];
     snprintf(path, sizeof(path), "/vol/content/%s", sfxs[i].fp);
@@ -175,10 +121,6 @@ static void load_sfx() {
     for (u8 i = 0; i < nSfx; i++) load_one_sfx(i, &offset);
 }
 
-// @p volume is a linear amplitude coefficient here: 0 silence, 255 unity --
-// this backend's reading of the byte audio.hpp deliberately leaves
-// uninterpreted, and the same one SDL3 and Wii U use, since all three are the
-// same voice-mixing shape.
 void audio::SfxPlay(const u8 index, const u8 channel, const u8 volume) {
     if (index >= nSfx || channel >= N_SFX_VOICES || sfx_info[index].length == 0) return;
     SDL_LockAudioDevice(dev);
@@ -191,14 +133,8 @@ void audio::SfxPlay(const u8 index, const u8 channel, const u8 volume) {
     SDL_UnlockAudioDevice(dev);
 }
 
-// Unity: there is no separate sample bank off NES to carry a level of its own
-// (audio.hpp's ::SfxSamplePlay), so this plays the asset as authored.
 void audio::SfxSamplePlay(const u8 index) { audio::SfxPlay(index, 1, 0xFF); }
 
-// Exact here, unlike the NES driver: a voice is a cursor this backend owns, so
-// releasing or freezing one is local state (see audio.hpp's ::SfxStop on why
-// the NES cannot). Both ignore an out-of-range channel rather than clamping
-// into someone else's slot; the range is audio::sfxChannels.
 void audio::SfxStop(const u8 channel) {
     if (channel >= N_SFX_VOICES) return;
     sfx_voices[channel].active = false;
@@ -211,7 +147,6 @@ void audio::SfxPause(const u8 channel, const u8 pause) {
 }
 
 
-// Decode the embedded OGG and convert it to the 48k/2ch/s16 device format.
 static void load_track() {
     int channels = 0, rate = 0;
     short *decoded = nullptr;
@@ -223,9 +158,6 @@ static void load_track() {
     }
     const u32 pcm_bytes = static_cast<u32>(frames) * channels * sizeof(short);
 
-    // Build a converter from the decoded spec (native-endian S16) to the device
-    // format. SDL_ConvertAudio works in place in a buffer sized
-    // cvt.len * cvt.len_mult, so allocate that.
     SDL_AudioCVT cvt;
     const int r = SDL_BuildAudioCVT(&cvt,
                                     AUDIO_S16SYS, static_cast<Uint8>(channels), rate,
@@ -237,7 +169,6 @@ static void load_track() {
     }
 
     if (r == 0) {
-        // Already in device format; keep the decoded buffer as-is.
         track_data = static_cast<u8 *>(SDL_malloc(pcm_bytes));
         if (track_data) {
             memcpy(track_data, decoded, pcm_bytes);
@@ -262,17 +193,12 @@ static void load_track() {
         track_len  = static_cast<u32>(cvt.len_cvt) & ~(BYTES_PER_FRAME - 1);
     }
 
-    // tracks[0].loop_start is in seconds (0 = loop the whole track); convert to a
-    // frame-aligned byte offset in the converted stream.
     u32 lp = 0;
     if (nTracks > 0) lp = static_cast<u32>(tracks[0].loop_start * BYTES_PER_SEC);
     lp &= ~(BYTES_PER_FRAME - 1);
     loop_point = (track_len && lp < track_len) ? lp : 0;
 }
 
-// SDL audio callback: fill `len` bytes from the track (or silence when
-// stopped/paused/absent), looping at loop_point, then additively mix in
-// every active SFX voice (s16, clamped).
 static void audio_callback(void *, u8 *stream, int len) {
     if (!playing || paused || track_len == 0) {
         memset(stream, 0, static_cast<size_t>(len));
@@ -291,10 +217,6 @@ static void audio_callback(void *, u8 *stream, int len) {
 
     i16 *out = reinterpret_cast<i16 *>(stream);
 
-    // Music volume, scaled BEFORE the SFX mix below so effects keep their full
-    // level (audio.hpp). Skipped at 100; the product is computed in `int`
-    // because i16 * 100 overflows 16 bits. Same arrangement as the Switch
-    // backend, which has the same one-buffer shape.
     if (volume != 100) {
         for (u32 i = 0; i < static_cast<u32>(len) / sizeof(i16); i++) {
             out[i] = static_cast<i16>(static_cast<int>(out[i]) * volume / 100);
@@ -306,12 +228,6 @@ static void audio_callback(void *, u8 *stream, int len) {
         u32 avail = v.end - v.pos;
         u32 n = static_cast<u32>(len) < avail ? static_cast<u32>(len) : avail;
         const i16 *src = reinterpret_cast<const i16 *>(sfx_data + v.pos);
-        // Scaled by this voice's own gain, then added and clamped as before.
-        // `/ 255` and not `>> 8` because 255 is unity: a shift would make full
-        // volume 255/256 of the asset's level, which is inaudible on its own
-        // but means SfxPlay(..., 0xFF) and SfxSamplePlay disagree. The divisor
-        // is a constant, so the compiler turns it into a multiply and a shift.
-        // Gain is hoisted out of the loop -- it cannot change mid-chunk.
         const int gain = v.gain;
         for (u32 i = 0; i < n / sizeof(i16); i++) {
             const int scaled = static_cast<int>(src[i]) * gain / 255;
@@ -331,13 +247,10 @@ void audio::Init(u8) {
     SDL_zero(want);
     want.freq     = SAMPLE_RATE;
     want.format   = AUDIO_S16SYS;   // == AUDIO_S16MSB on big-endian Espresso,
-                                    // exactly what the wiiu AX driver forces.
     want.channels = 2;
     want.samples  = 1024;
     want.callback = audio_callback;
 
-    // allowed_changes == 0 forces the device to our format, so the callback can
-    // assume 48k/2ch/s16 and the converted track buffer matches it exactly.
     dev = SDL_OpenAudioDevice(nullptr, 0, &want, nullptr, 0);
     if (dev == 0) {
         SDL_Log("AUDIO: SDL_OpenAudioDevice failed: %s", SDL_GetError());
@@ -347,7 +260,6 @@ void audio::Init(u8) {
 }
 
 void audio::Update() {
-    // Streaming is driven by the SDL audio callback; nothing to do per frame.
 }
 
 void audio::TrackPlay(const u8 index) {
@@ -365,8 +277,6 @@ void audio::TrackStop() {
     SDL_UnlockAudioDevice(dev);
 }
 
-// Behind the device lock, like every other writer of callback state: the
-// callback reads ::volume, and a torn read would be an audible step mid-buffer.
 void audio::TrackVolume(const u8 percent) {
     SDL_LockAudioDevice(dev);
     volume = percent > 100 ? 100 : percent;
