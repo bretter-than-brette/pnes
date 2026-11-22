@@ -57,6 +57,19 @@ constexpr bool is_nes = false;
  * Wii U was a three-line change rather than another sweep through the gates is
  * the whole return on this macro existing.
  *
+ * THE PSP IS THE SIXTH (src/psp/save.cpp), and it is in here on a reading of
+ * "can be absent" worth stating, because it is the first target where the
+ * DEVICE ITSELF is not fixed at compile time: the save goes beside the EBOOT on
+ * whichever medium the game was launched from, a Memory Stick on every retail
+ * model and internal flash on a PSP Go, and that backend finds out which at
+ * runtime. Internal flash cannot be absent -- so on a Go this macro is, strictly,
+ * a capability the hardware does not need. It is still right to define: a stick
+ * is removable on every other model and on a Go with a stick in it, the save UI
+ * this macro gates is drawn against ::save::AccessibleDevices rather than
+ * against the macro, and a flow that must handle a missing device on five
+ * consoles is not made worse by also compiling where one cannot go missing. One
+ * device, so not ::SAVE_DEVICE_CHOICE below, for the Switch's reason.
+ *
  * WHAT IT MEANS, PRECISELY, because the two targets it excludes are excluded
  * for opposite reasons:
  *   - THE NES IS NOT IN IT even though its saves work. A battery cart's save IS
@@ -73,7 +86,7 @@ constexpr bool is_nes = false;
  * "is there a device to look for, choose, and fail to find", which is what a
  * save UI is made of.
  *
- * A SIXTH BACKEND ADDS ITSELF HERE AND NOWHERE ELSE. Defined with no value
+ * A SEVENTH BACKEND ADDS ITSELF HERE AND NOWHERE ELSE. Defined with no value
  * and consumed with `#ifdef`, like ::SAVE_FILE and the TARGET_* family.
  *
  * IT LIVES IN THIS HEADER RATHER THAN IN save.hpp, WHERE IT BELONGS BY
@@ -92,7 +105,7 @@ constexpr bool is_nes = false;
  * SDK could collide with.
  */
 #if defined(TARGET_OGC) || defined(TARGET_NX) || defined(TARGET_CTR) \
- || defined(TARGET_WIIU)
+ || defined(TARGET_WIIU) || defined(TARGET_PSP)
 #define SAVE_DEVICE
 #endif
 

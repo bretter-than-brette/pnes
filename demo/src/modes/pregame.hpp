@@ -5,7 +5,7 @@
 // See the matching guard in pregame.cpp for why this is ::SAVE_DEVICE and not
 // `#ifndef TARGET_NES`: the mode needs a save device that can be absent, and
 // the macro (pnes/save.hpp) is the one list of the targets that have one --
-// the GameCube, the Wii, the Switch, the 3DS and the Wii U.
+// the GameCube, the Wii, the Switch, the 3DS, the Wii U and the PSP.
 #ifdef SAVE_DEVICE
 
 constexpr auto retryText        = ::charmap_generic.encode("RETRY");
@@ -16,12 +16,23 @@ constexpr auto eraseText        = ::charmap_generic.encode("ERASE ALL");
 // THE TWO DEVICE LABELS, AND THE ONLY PART OF THIS WHEEL THAT IS PER CONSOLE.
 // ::Card1 / ::Card2 are device indices 0 and 1 (demo/src/save.hpp), and what
 // sits at those indices is what changes: slots A and B on the GameCube, the
-// front SD slot and USB mass storage on the Wii, and on the Switch, the 3DS and
+// front SD slot and USB mass storage on the Wii, the launch medium on the PSP,
+// and on the Switch, the 3DS and
 // the Wii U index 0 alone. Same wheel, same indices, the player's own words for
 // what they are putting their save on.
 #ifdef TARGET_GC
 constexpr auto card1Text        = ::charmap_generic.encode("CARD 1");
 constexpr auto card2Text        = ::charmap_generic.encode("CARD 2");
+#elif defined(TARGET_PSP)
+// THE PSP'S ONE DEVICE, NAMED BY ITS MOST LIKELY HARDWARE for the reason
+// demo/src/save.hpp's TARGET_PSP branch gives: the save goes beside the EBOOT on
+// whichever medium the game was launched from, and "MEMORY STICK" is right on
+// every model but a PSP Go running from internal flash -- which is also the one
+// configuration that can never see this wheel, since it is drawn only where a
+// player picks a device (::SAVE_DEVICE_CHOICE) and two are accessible at once,
+// and this backend has one device (src/psp/save.cpp's ::kDeviceCount).
+constexpr auto card1Text        = ::charmap_generic.encode("MEMORY STICK");
+constexpr auto card2Text        = ::charmap_generic.encode("MEMORY STICK");
 #elif defined(TARGET_NX) || defined(TARGET_CTR) || defined(TARGET_WIIU)
 // ONE DEVICE, AND ::card2Text LABELS AN INDEX THAT DOES NOT EXIST HERE. The
 // wheel these label is only drawn where the player picks a device

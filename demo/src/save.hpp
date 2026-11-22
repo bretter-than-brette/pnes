@@ -14,7 +14,8 @@ constexpr u16 saveVersion = 1;
 // of choices is drawn with and the names of the device slots every
 // ::save::AccessibleDevices mask has. The Wii's devices are the front SD slot
 // and USB mass storage where the GameCube's are card slots A and B, and the
-// Switch, the 3DS and the Wii U have one SD card each -- which changes the TEXT
+// Switch, the 3DS and the Wii U have one SD card each, and the PSP has one
+// Memory Stick (or a PSP Go's internal flash) -- which changes the TEXT
 // below and nothing about the flow, so the gate is the capability
 // (pnes/save.hpp) and the wording is what varies inside it.
 //
@@ -27,7 +28,8 @@ constexpr u16 saveVersion = 1;
 // ::Card2 IS DECLARED ON A ONE-DEVICE CONSOLE AND NEVER RETURNED THERE, which
 // is the same trade save.hpp makes with ::save::busy: the wheel it labels is
 // only ever drawn when TWO devices are accessible at once (::TryCreateSave's
-// `saveDevices == 0b11`), and on the Switch, the 3DS and the Wii U that mask
+// `saveDevices == 0b11`), and on the Switch, the 3DS, the Wii U and the PSP
+// that mask
 // cannot happen. The arm still has to COMPILE, and a dead one costs nothing.
 enum eOptions : u8 {
 #ifdef SAVE_DEVICE
@@ -111,6 +113,29 @@ constexpr auto saveUseCard          = ::charmap_generic.encode("CONFIRM USE SD C
 constexpr auto saveNoDeviceText    = ::charmap_generic.encode("NO SD CARD FOUND");
 constexpr auto saveChooseCard       = ::charmap_generic.encode("CHOOSE DEVICE");
 constexpr auto saveUseCard          = ::charmap_generic.encode("CONFIRM USE SD CARD");
+#elif defined(TARGET_PSP)
+// THE PSP'S THREE, AND THIS IS THE FIRST CONSOLE WHERE THE DEVICE'S NAME IS A
+// GUESS. The other four one-device branches can say what the save is on because
+// the backend knows: an SD card, always, on all three of them. This one's save
+// goes beside the EBOOT on whatever the game was launched from
+// (src/psp/save.cpp), which is a Memory Stick on every retail model and
+// internal flash on a PSP Go -- and the message has to be written before either
+// is known.
+//
+// "MEMORY STICK" IS THE RIGHT GUESS ANYWAY, for the reason the backend's own
+// fallback picks ms0:. A player who can see this message is a player whose save
+// device went missing, and internal flash cannot go missing: a Go running from
+// ef0: never reports ::save::no_device, so the one player who would be told the
+// wrong thing is the one who will never be told it.
+//
+// THE OTHER TWO ARE THE WORDING A ONE-DEVICE CONSOLE WOULD USE IF IT EVER
+// ASKED, for the Switch's reason exactly: a project that defines
+// ::SAVE_DEVICE_CHOICE gets the prompts, and ::saveChooseCard is referenced on
+// every ::SAVE_DEVICE target regardless (the two-device wheel compiles
+// everywhere, it just cannot be reached with one bit in the mask).
+constexpr auto saveNoDeviceText    = ::charmap_generic.encode("NO MEMORY STICK FOUND");
+constexpr auto saveChooseCard       = ::charmap_generic.encode("CHOOSE DEVICE");
+constexpr auto saveUseCard          = ::charmap_generic.encode("CONFIRM USE MEMORY STICK");
 #else
 // THE WII'S THREE, AND ONLY THE WORDING DIFFERS. "MEMORY CARD" is a thing this
 // console does not have: its devices are the front SD slot and a USB disk, so
@@ -193,6 +218,12 @@ extern SAVEMEM SaveFile saveData;
 // "fs:/vol/external01/wiiu/super_mary_sisters/save.dat", and
 // ::pregame::main fills it from whatever ::save::GetSaveLocation answered in
 // every case.
+//
+// ON THE PSP IT IS NOT KNOWN UNTIL IT IS ASKED FOR, which is what this pointer
+// being filled from the response was always for: the save sits beside the
+// EBOOT, so the path is "ms0:/PSP/GAME/<whatever the player called the
+// folder>/save.dat" -- or the same under ef0: on a PSP Go -- and no build knob
+// or #ifdef here could have spelt it (src/psp/save.cpp).
 #ifdef SAVE_DEVICE
 extern char* savePath;
 #endif

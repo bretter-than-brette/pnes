@@ -3318,6 +3318,70 @@ copied into the .wuhb content tree (mounted at /vol/content).")
         endif()
         target_link_libraries(pnes PUBLIC br0::intsh br0::tuple br0::consh)
 
+        # ------------------------------------------------------------------
+        # Where a PSP save lives, and the one case where this gets to decide.
+        #
+        # THE DIRECTORY IS NORMALLY NOT A KNOB AT ALL, which is what makes this
+        # branch different from the four above it. src/psp/save.cpp puts the
+        # save beside the running EBOOT -- it asks getcwd(), which pspsdk's
+        # startup has already pointed at the folder the game was launched from
+        # -- so the directory is the one the PLAYER chose when they copied the
+        # game onto their Memory Stick, and the device is whichever one they
+        # launched it from (ms0: on a Fat/Slim/Go with a stick, ef0: on a PSP
+        # Go's internal flash). That is the whole reason the location is
+        # resolved at runtime on this console and compiled in on the others;
+        # see that file's header comment.
+        #
+        # SO PSP_SAVE_DIR IS THE FALLBACK AND NOTHING ELSE. It names the folder
+        # under ms0:/PSP/GAME used when the launch path cannot be discovered --
+        # a module the kernel started without an argv[0], or a path too long for
+        # pspsdk's own 255-character POSIX limit. A project that never meets
+        # either case never sees this value, and one that does gets a save in a
+        # directory of its own rather than in the stick's root.
+        #
+        # PSP_SAVE_FILENAME IS THE ONE THAT CANNOT MOVE LATER, for the Wii's and
+        # the Switch's reason: the backend's search is PATH-based, so a build
+        # that renames it stops finding every save written by every earlier
+        # build. The data is still on the stick and the game simply reports that
+        # there is no save -- which looks like a bug in the stick, so it is worth
+        # saying here and not only in the backend.
+        #
+        # NO SAVEDATA KNOBS (game id, PARAM.SFO fields, ICON0), deliberately:
+        # this backend writes a plain file because an XMB-visible savedata
+        # directory needs a game id a homebrew EBOOT does not own, and shows up
+        # as "Corrupted Data" without a PARAM.SFO. See src/psp/save.cpp's header
+        # comment for the three things an XMB-visible save would change.
+        # ------------------------------------------------------------------
+        set(PSP_SAVE_DIR      "super_mary_sisters" CACHE STRING "PSP fallback save directory under ms0:/PSP/GAME")
+        set(PSP_SAVE_FILENAME "save.dat"           CACHE STRING "PSP save file name, beside the running EBOOT")
+
+        # Checked here as well as by save.cpp's own static_asserts, so that a
+        # bad value set in local.cmake names itself at configure time rather
+        # than as a static_assert in a backend the setter may never have opened.
+        foreach(_psp_knob PSP_SAVE_DIR PSP_SAVE_FILENAME)
+            string(LENGTH "${${_psp_knob}}" _psp_knob_len)
+            if(_psp_knob_len EQUAL 0 OR _psp_knob_len GREATER 255)
+                message(FATAL_ERROR
+                    "${_psp_knob} must be 1-255 characters, got \"${${_psp_knob}}\" (${_psp_knob_len}) "
+                    "-- it is one FAT long-name component, not a path")
+            endif()
+            if("${${_psp_knob}}" MATCHES "[/\\:]")
+                message(FATAL_ERROR
+                    "${_psp_knob} must be a single name with no '/', '\\' or ':', got \"${${_psp_knob}}\" "
+                    "-- src/psp/save.cpp adds the separators, and a ':' on this console names a device")
+            endif()
+        endforeach()
+
+        # PRIVATE for the reason the other backends' location knobs are: the
+        # save's location is the backend's business, and nothing a game includes
+        # reads it. A game that wants to show a player where its save went asks
+        # ::save::GetDeviceStatus, which answers with the complete path -- which
+        # on this console is the only way to learn it, since the build does not
+        # know it.
+        target_compile_definitions(pnes PRIVATE
+                "PSP_SAVE_DIR=\"${PSP_SAVE_DIR}\""
+                "PSP_SAVE_FILENAME=\"${PSP_SAVE_FILENAME}\"")
+
         # The PSP Fat/Slim's 32-64MB of RAM can't hold the 47MB desktop
         # pc_audio.wav decoded to raw PCM, so this follows the GameCube/Wii U
         # shape: transcode to a small Vorbis OGG at build time and #embed it

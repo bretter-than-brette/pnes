@@ -37,7 +37,11 @@ namespace save {
      * honestly: a file that is already there is ::exists, a full card is
      * ::full, a read-only volume is ::denied. The Switch's SD-card backend (src/switch/save.cpp) reaches
      * the same ones through the same errno, which is the whole reason the gate
-     * is now a capability and not a platform: see ::SAVE_DEVICE.
+     * is now a capability and not a platform: see ::SAVE_DEVICE. The 3DS, the
+     * Wii U and the PSP reach them the same way again -- the PSP with one
+     * wrinkle of its own, since its POSIX layer leaves errno untouched for
+     * failures outside one sce error family and that backend has to say
+     * ::failed where it cannot classify what happened (src/psp/save.cpp).
      *
      * STILL GATED AT ALL, rather than declared everywhere, for the NES's sake:
      * a battery cart has one failure mode and a game that compiles for it
@@ -166,7 +170,11 @@ namespace save {
      * and bit 1 its slot B, and on the Wii bit 0 is the front SD slot and bit 1
      * USB mass storage. A BACKEND MAY HAVE ONLY ONE: on the Switch bit 0 is the
      * SD card and no other bit is ever set, which is why a caller reads bits
-     * rather than counting devices. Zero means there is nowhere to save at this
+     * rather than counting devices. WHAT A BIT NAMES IS THE BACKEND'S TO
+     * DECIDE and need not be fixed hardware: on the PSP bit 0 is whichever
+     * medium the game was launched from -- a Memory Stick, or a PSP Go's
+     * internal flash -- because that is where that console's save belongs
+     * (src/psp/save.cpp). Zero means there is nowhere to save at this
      * instant, which is also the permanent answer on every target still on the
      * weak backend in src/all/save.cpp.
      *
