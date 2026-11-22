@@ -64,10 +64,12 @@
  * console that is slower than on the Switch by a wide margin -- an ARM11 at
  * 268MHz talking to an SD card over a 1-bit-wide bus on an o3DS. A save of one
  * 8KiB unit still lands inside a frame or two rather than needing a screen in
- * front of it (which is why ::SAVE_DEVICE_WAIT is not defined here either --
- * pnes/technology.hpp), but it is the slowest of the three filesystem backends
- * and a game writing a large save should expect to drop a frame. The expensive
- * calls are named where they happen (::Mount, ::Detected, ::save::FreeDevices).
+ * front of it -- and because every call here reports `done` on its first tick,
+ * a game's save screen finds that out from the write itself rather than from
+ * anything this backend has to declare -- but it is the slowest of the three
+ * filesystem backends, and a game writing a large save should expect to drop a
+ * frame. The expensive calls are named where they happen (::Mount, ::Detected,
+ * ::save::FreeDevices).
  *
  * THE SEARCH IS PATH-BASED, LIKE THE SWITCH'S AND THE WII'S. There is no
  * equivalent of CARD_FindFirst's gamecode filter on a FAT volume, so a save is

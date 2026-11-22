@@ -1266,9 +1266,10 @@ namespace title {
                         // something to save. ::pregame::SaveScreen writes it
                         // and runs its own RETRY / CONTINUE wheel if the device
                         // will not take it -- blocking with SAVING on screen
-                        // only where a write is slow enough to be worth saying
-                        // so (::SAVE_DEVICE_WAIT), and drawing nothing at all
-                        // where it is not.
+                        // only where the write actually spans frames, which it
+                        // learns from the write's own first tick rather than
+                        // from anything declared per platform, and drawing
+                        // nothing at all where it does not.
                         //
                         // ::SAVE_DEVICE AND NOT TARGET_GC, which is what
                         // makes a Wii -- and now a Switch -- remember its

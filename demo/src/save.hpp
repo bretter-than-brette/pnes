@@ -14,9 +14,9 @@ constexpr u16 saveVersion = 1;
 // of choices is drawn with and the names of the device slots every
 // ::save::AccessibleDevices mask has. The Wii's devices are the front SD slot
 // and USB mass storage where the GameCube's are card slots A and B, and the
-// Switch has one SD card -- which changes the TEXT below and nothing about the
-// flow, so the gate is the capability (pnes/save.hpp) and the wording is what
-// varies inside it.
+// Switch, the 3DS and the Wii U have one SD card each -- which changes the TEXT
+// below and nothing about the flow, so the gate is the capability
+// (pnes/save.hpp) and the wording is what varies inside it.
 //
 // ::Card1 / ::Card2 KEEP THEIR NAMES on every console, deliberately. They are
 // the labels the choice wheel returns, indexed the way save.hpp's device
@@ -27,8 +27,8 @@ constexpr u16 saveVersion = 1;
 // ::Card2 IS DECLARED ON A ONE-DEVICE CONSOLE AND NEVER RETURNED THERE, which
 // is the same trade save.hpp makes with ::save::busy: the wheel it labels is
 // only ever drawn when TWO devices are accessible at once (::TryCreateSave's
-// `saveDevices == 0b11`), and on the Switch that mask cannot happen. The arm
-// still has to COMPILE, and a dead one costs nothing.
+// `saveDevices == 0b11`), and on the Switch, the 3DS and the Wii U that mask
+// cannot happen. The arm still has to COMPILE, and a dead one costs nothing.
 enum eOptions : u8 {
 #ifdef SAVE_DEVICE
     Continue,
@@ -76,6 +76,32 @@ constexpr auto saveUseCard          = ::charmap_generic.encode("CONFIRM USE SD C
 // that can see that happen), so this is the console where that message is
 // actually read, and it is the console whose wording would change first if the
 // flow ever had anything more to say about a card that went away mid-game.
+//
+// THE OTHER TWO ARE THE WORDING A ONE-DEVICE CONSOLE WOULD USE IF IT EVER
+// ASKED, for the Switch's reason exactly: a project that defines
+// ::SAVE_DEVICE_CHOICE gets the prompts, and ::saveChooseCard is referenced on
+// every ::SAVE_DEVICE target regardless (the two-device wheel compiles
+// everywhere, it just cannot be reached with one bit in the mask).
+constexpr auto saveNoDeviceText    = ::charmap_generic.encode("NO SD CARD FOUND");
+constexpr auto saveChooseCard       = ::charmap_generic.encode("CHOOSE DEVICE");
+constexpr auto saveUseCard          = ::charmap_generic.encode("CONFIRM USE SD CARD");
+#elif defined(TARGET_WIIU)
+// THE WII U'S THREE, WHICH ARE THE SWITCH'S AND THE 3DS'S WORD FOR WORD and are
+// kept as their own branch for the reason the 3DS's are: the agreement is about
+// the hardware having one SD card, not about the consoles being the same case.
+// This one's card is removable while a game runs, like the 3DS's -- but unlike
+// the 3DS there is nothing to ask about the slot, so the backend finds out when
+// the system tears the mount down (src/wiiu/save.cpp's ::Mounted) rather than
+// when the card moves. "NO SD CARD FOUND" is therefore what a Wii U player sees
+// both for a card that was never there and for one that has gone, and this is
+// the branch whose wording would change if that distinction ever mattered to
+// the flow.
+//
+// IT MUST NOT FALL THROUGH TO THE WII'S BRANCH BELOW, which is the practical
+// point of its existing: that one says "NO SD CARD OR USB DRIVE", and this
+// console's backend has one device and no USB story at all
+// (src/wiiu/save.cpp's ::kDeviceCount), so a player would be told to try a
+// drive the save could never go to.
 //
 // THE OTHER TWO ARE THE WORDING A ONE-DEVICE CONSOLE WOULD USE IF IT EVER
 // ASKED, for the Switch's reason exactly: a project that defines
@@ -162,8 +188,9 @@ extern SAVEMEM SaveFile saveData;
 
 // WIDENED WITH THE FLOW: a path is not a memory-card concept. On the GameCube
 // it is "a:super_mary_sisters", on the Wii "sd:/super_mary_sisters/save.dat"
-// on the Switch "sdmc:/switch/super_mary_sisters/save.dat" and on the 3DS
-// "sdmc:/3ds/super_mary_sisters/save.dat", and
+// on the Switch "sdmc:/switch/super_mary_sisters/save.dat", on the 3DS
+// "sdmc:/3ds/super_mary_sisters/save.dat" and on the Wii U
+// "fs:/vol/external01/wiiu/super_mary_sisters/save.dat", and
 // ::pregame::main fills it from whatever ::save::GetSaveLocation answered in
 // every case.
 #ifdef SAVE_DEVICE

@@ -2929,6 +2929,76 @@ transcoded into the .nro's RomFS as sfx/<name>.raw.")
         endif()
         target_link_libraries(pnes PUBLIC SDL2::SDL2-static br0::intsh br0::tuple br0::consh)
 
+        # ------------------------------------------------------------------
+        # Where a Wii U save lives on the SD card.
+        #
+        # TWO NAMES AND NOT A PATH, for the Wii's, the Switch's and the 3DS's
+        # reason (see WII_SAVE_DIR, NX_SAVE_DIR and CTR_SAVE_DIR above):
+        # src/wiiu/save.cpp assembles "fs:/vol/external01/wiiu/<dir>/<file>"
+        # from them itself and static_asserts that neither contains a
+        # separator, because a WIIU_SAVE_DIR with a slash in it would silently
+        # point the save somewhere else -- possibly into another homebrew app's
+        # directory under sd:/wiiu.
+        #
+        # "wiiu" IS NOT A KNOB. It is the fixed parent the backend adds: the
+        # Homebrew Launcher and Aroma list applications from sd:/wiiu/apps and
+        # homebrew keeps its data under sd:/wiiu by convention, so
+        # WIIU_SAVE_DIR names one directory inside that and nothing a project
+        # sets can put a save in the card's root -- which on this console is
+        # shared with the system's own directories.
+        #
+        # NO LINK LIBRARY GOES WITH THIS, unlike the Wii's `fat`: the backend
+        # is stdio against the devoptab wut's own startup mounts, and the one
+        # non-stdio call it makes (WHBMountSdCard, for a card inserted after
+        # launch) lives in libwut.a, which Platform/CafeOS.cmake already links
+        # as a standard library.
+        #
+        # WIIU_SAVE_DIR IS THE ONE THAT CANNOT MOVE LATER, exactly as the
+        # Wii's, the Switch's and the 3DS's cannot: this backend's search is
+        # PATH-based (there is no equivalent of CARD_FindFirst's gamecode
+        # filter on a filesystem), so a build that renames either knob stops
+        # finding every save written by every earlier build. The data is still
+        # on the card and the game simply reports that there is no save --
+        # which looks like a bug in the card, so it is worth saying here and
+        # not only in the backend.
+        #
+        # NO SAVEDATA KNOBS (account slot, quota size), deliberately, and NOT
+        # for the Switch's and the 3DS's reason -- this target HAS a title id
+        # of its own (WIIU_TITLE_ID below). The save still goes to the SD card
+        # because /vol/save is not a devoptab path at all and because that
+        # title id is a placeholder a project is expected to override, which
+        # would strand every save written under the previous one. See
+        # src/wiiu/save.cpp's header comment.
+        # ------------------------------------------------------------------
+        set(WIIU_SAVE_DIR      "super_mary_sisters" CACHE STRING "Wii U save directory under sd:/wiiu")
+        set(WIIU_SAVE_FILENAME "save.dat"           CACHE STRING "Wii U save file name inside WIIU_SAVE_DIR")
+
+        # Checked here as well as by save.cpp's own static_asserts, so that a
+        # bad value set in local.cmake names itself at configure time rather
+        # than as a static_assert in a backend the setter may never have opened.
+        foreach(_wiiu_knob WIIU_SAVE_DIR WIIU_SAVE_FILENAME)
+            string(LENGTH "${${_wiiu_knob}}" _wiiu_knob_len)
+            if(_wiiu_knob_len EQUAL 0 OR _wiiu_knob_len GREATER 255)
+                message(FATAL_ERROR
+                    "${_wiiu_knob} must be 1-255 characters, got \"${${_wiiu_knob}}\" (${_wiiu_knob_len}) "
+                    "-- it is one FAT long-name component, not a path")
+            endif()
+            if("${${_wiiu_knob}}" MATCHES "[/\\:]")
+                message(FATAL_ERROR
+                    "${_wiiu_knob} must be a single name with no '/', '\\' or ':', got \"${${_wiiu_knob}}\" "
+                    "-- src/wiiu/save.cpp adds the separators and the fs:/vol/external01/wiiu prefix itself")
+            endif()
+        endforeach()
+
+        # PRIVATE for the reason the OGC, Switch and 3DS backends' own location
+        # knobs are: the save's location is the backend's business, and nothing
+        # a game includes reads it. A game that wants to show a player where its
+        # save went asks ::save::GetDeviceStatus, which answers with the
+        # complete path.
+        target_compile_definitions(pnes PRIVATE
+                "WIIU_SAVE_DIR=\"${WIIU_SAVE_DIR}\""
+                "WIIU_SAVE_FILENAME=\"${WIIU_SAVE_FILENAME}\"")
+
         # The music is EMBEDDED in the .rpx, not loaded from disk: a native Wii U
         # title only has a /vol/content mount when launched with its packaged
         # content, and a bare .rpx (e.g. dropped into Cemu) has none. So encode

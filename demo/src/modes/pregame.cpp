@@ -872,13 +872,27 @@ static const u8* SaveErrorText(const save::eError err) {
  * @brief Writes ::saveData, shows SAVING in this mode's own quadrant where that
  *        is worth showing, and offers RETRY / CONTINUE if the write fails.
  *
- * WHETHER THERE IS A SCREEN AT ALL IS ::SAVE_DEVICE_WAIT'S ANSWER
- * (pnes/technology.hpp). Where a write spans frames -- a GameCube memory card's
- * ticked CARD_* sequence -- the game has to present frames through it anyway,
- * and SAVING is what they say. Where it finishes inside the frame that started
- * it, the write runs FIRST and this function returns having drawn nothing, so a
- * save costs no camera move and no flicker. Everything from the scene down is
- * then the FAILURE path, which both kinds of platform reach identically.
+ * WHETHER THERE IS A SCREEN AT ALL IS THE WRITE'S OWN ANSWER, AND NOBODY
+ * ELSE'S. Every save call in this library is ticked -- it reports `done` when
+ * it is over, and the caller presents a frame for each one that is not
+ * (pnes/save.hpp) -- so "does this write span frames" is something the FIRST
+ * TICK says out loud. ::SaveScreenPump is the whole of acting on it: the screen
+ * is built by the first frame that actually has to be WAITED, so a GameCube
+ * memory card's ticked CARD_* sequence draws SAVING for the whole of its write
+ * and a backend that finishes on tick one draws nothing whatsoever. No camera
+ * move, no vector swap, no flicker, and no list of which consoles those are.
+ *
+ * THAT LIST USED TO EXIST AND WAS WRONG. ::SAVE_DEVICE_WAIT was a capability
+ * macro saying the same thing a #ifdef ahead of time, spelt TARGET_OGC -- so
+ * the Wii, whose libfat write is blocking and finishes on its first tick, got
+ * the GameCube's screen and flickered it on and off inside two frames every
+ * time a player left the options page. The macro is gone: there is nothing for
+ * a fifth backend to remember to add itself to, because the thing it would have
+ * declared is measured per attempt instead.
+ *
+ * THE FAILURE PATH IS WHAT BOTH KINDS OF PLATFORM REACH IDENTICALLY, and it is
+ * the one place the screen is built on purpose rather than by waiting -- see
+ * ::BuildSaveScreen.
  *
  * REACHED FROM TITLE MODE, not from ::main -- the options page's settings ARE
  * the save file (demo/src/save.hpp's SaveFile::config is what uitk writes the
@@ -916,42 +930,35 @@ static const u8* SaveErrorText(const save::eError err) {
  *         comes back either way -- but a caller that wanted to refuse to leave
  *         until the save landed has the answer here rather than in a log line.
  */
-bool SaveScreen() {
-    // THE OUTCOME THIS SCREEN IS ABOUT TO REPORT, when the write has already
-    // been attempted. `pending` is what says whether `response` holds one yet.
-    bool           pending  = false;
-    save::Response response { };
+/**
+ * @brief The borrowed scene and vectors, built at most once per ::SaveScreen.
+ *
+ * SPLIT OUT OF ::SaveScreen SO IT CAN HAPPEN LATE. Nothing here is drawn until
+ * something has proved it is worth drawing -- either the write turned out to
+ * span frames (::SaveScreenPump) or it failed (::SaveScreen's error arm) -- and
+ * both of those discoveries happen after the write has already started. So the
+ * setup has to be callable from the middle of the attempt rather than ahead of
+ * it, and it has to be IDEMPOTENT: the pump calls it on its first waited frame,
+ * the error arm calls it on a platform where no frame was ever waited, and a
+ * RETRY runs through both again.
+ *
+ * ::saveScreenBuilt IS ALSO THE TEARDOWN'S FLAG. A save that never waited and
+ * never failed borrows nothing, so there is nothing to put back -- and
+ * ::SaveScreen must not restore an NMI vector it never swapped.
+ */
+bool saveScreenBuilt = false;
+void (*saveScreenCallerNMI)() = nullptr;
 
-#ifndef SAVE_DEVICE_WAIT
-    // THE WRITE FIRST, BEFORE ONE TILE IS DRAWN, on a platform whose save
-    // finishes inside the frame that starts it (::SAVE_DEVICE_WAIT,
-    // pnes/technology.hpp). A screen announcing a write that is already over
-    // is a flicker: the camera moves to another quadrant, a word appears, and
-    // both are undone a frame later.
-    //
-    // nullptr AND NOT ::WaitBody AS THE PUMP, which is not a detail: ::SaveGame
-    // calls the pump once per WAITED frame, and a blocking backend reports
-    // `done` on its first tick -- so the loop body never runs and NO frame is
-    // presented by this path at all. Handing it ::WaitBody would be harmless
-    // and would also be a promise about ticking that this arm is here because
-    // the platform does not need.
-    //
-    // A SUCCESS RETURNS BEFORE ANYTHING IS BORROWED: no NMI vector swapped, no
-    // scene re-Made, no camera moved, so there is nothing to put back and the
-    // options page's own unwind runs exactly as it would have. A FAILURE falls
-    // through with `pending` set, and everything below happens as it always
-    // did -- the message it shows is this response, not a second attempt.
-    response = SaveGame(nullptr);
-    if (response.err == save::found) return true;
-    pending = true;
-#endif
+void BuildSaveScreen() {
+    if (saveScreenBuilt) return;
+    saveScreenBuilt = true;
 
     // The vectors, for the span of this screen only. ::nmi_handler is this
     // mode's own stub -- one frame of the arrow's sway and the OAM upload --
     // which is exactly what a wheel needs and all it needs; title mode's
     // handler would re-scroll the frame back onto the options page every
     // vblank and undo the camera below.
-    void (* const callerNMI)() = pNMI;
+    saveScreenCallerNMI = pNMI;
     pNMI = nmi_handler;
 
     // Nothing may fire a raster split under this screen. Title mode arms one
@@ -963,26 +970,57 @@ bool SaveScreen() {
 
     MakeScene();
     ppu::SetScroll(SceneOriginPixels());
+}
+
+/**
+ * @brief ::SaveGame's pump for this screen: the first WAITED frame is what
+ *        builds the screen and says SAVING.
+ *
+ * THIS IS WHERE "IS THE WRITE SLOW" IS ANSWERED, AND IT IS ANSWERED BY THE
+ * CONTRACT RATHER THAN BY A PLATFORM LIST. ::SaveGame calls the pump once per
+ * frame it has to WAIT (demo/src/save.hpp), so a backend that reports `done` on
+ * its first tick -- the Wii's blocking libfat, the Switch's and the 3DS's
+ * blocking stdio, the NES's battery RAM -- never reaches this function at all,
+ * and not one tile is drawn for a save the player could not have read a word
+ * about anyway. A GameCube memory card's ticked CARD_* sequence reaches it on
+ * every frame of the write, which is exactly the case the screen exists for.
+ *
+ * SO THERE IS NO CAPABILITY MACRO BEHIND THIS ANY MORE. There was one
+ * (::SAVE_DEVICE_WAIT), it said in a #ifdef what the first tick already says at
+ * runtime, and it was wrong for a whole console for exactly as long as it
+ * existed: spelt TARGET_OGC, it gave the Wii the GameCube's screen and flickered
+ * it on and off inside two frames every time a player left the options page. A
+ * fact the library can only state per platform is a fact that drifts; the tick
+ * is measured per attempt and cannot.
+ *
+ * SAVING IS PRINTED BEFORE THE FRAME IS PRESENTED, not after, so the word is up
+ * for the whole of the first frame the player waits. ::saveScreenSaid is per
+ * ATTEMPT rather than per screen: a RETRY that waits says it again, over the
+ * error message it is replacing, while a RETRY on a blocking backend says
+ * nothing and leaves the previous message up for the one frame it takes.
+ */
+bool saveScreenSaid = false;
+
+void SaveScreenPump() {
+    if (!saveScreenSaid) {
+        BuildSaveScreen();
+        PrintContext(saveSavingText.data());
+        saveScreenSaid = true;
+    }
+    WaitBody();
+}
+
+bool SaveScreen() {
+    saveScreenBuilt = false;
 
     bool saved = false;
     while (true) {
-        // SKIPPED ON THE FIRST PASS WHEN THE WRITE HAS ALREADY RUN, which is
-        // the whole of what the fast path above costs this loop: `pending`
-        // means `response` is an outcome to report rather than an attempt to
-        // make. It is cleared immediately, so RETRY goes through the write --
-        // and through SAVING, which by then is a screen the player is already
-        // looking at.
-        if (!pending) {
-            PrintContext(saveSavingText.data());
-            // One frame BEFORE the write starts, so SAVING is actually on
-            // screen for it: a memory card write that succeeds immediately
-            // would otherwise draw the word and take it away again inside the
-            // same frame, and the player would see nothing at all.
-            WaitBody();
+        // PER ATTEMPT, so a RETRY re-announces itself if it waits. Cleared
+        // before the write rather than after it, because the write is what
+        // decides whether the pump ever runs.
+        saveScreenSaid = false;
 
-            response = SaveGame(WaitBody);
-        }
-        pending = false;
+        const save::Response response = SaveGame(SaveScreenPump);
 
         if (response.err == save::found) {
             saved = true;
@@ -992,6 +1030,12 @@ bool SaveScreen() {
         log("pregame::SaveScreen: save failed err=%d native=%d",
             response.err, save::LastNativeError());
 
+        // THE FAILURE PATH IS THE ONE THAT MUST NOT ASSUME A SCREEN. On a
+        // blocking backend the pump never ran, so this is the first thing that
+        // needs the scene, the camera and this mode's NMI vector -- and on the
+        // GameCube it is already up and this call does nothing. Either way the
+        // message below is drawn into a screen that exists.
+        BuildSaveScreen();
         PrintContext(SaveErrorText(response.err));
         // RETRY re-runs the whole attempt, which is why the loop encloses the
         // message as well as the write: a card inserted in answer to NO MEMORY
@@ -1001,13 +1045,20 @@ bool SaveScreen() {
         if (ChoiceWheel(errorOpts, sizeof(errorOpts)) != Retry) break;
     }
 
-    // The band goes back to blank tiles. Nothing on screen depends on it --
-    // the rows this borrowed are ones the title screen never shows -- but a
-    // screen that cleans up after itself is what lets the next visit draw into
-    // the same rows without knowing what the last one left.
-    ClearContext();
+    // NOTHING TO PUT BACK WHEN NOTHING WAS BORROWED, which is the ordinary case
+    // on every console but the GameCube: a save that finished on its first tick
+    // drew no tile, moved no camera and swapped no vector, so the options
+    // page's own unwind runs exactly as it would have if this had never been
+    // called.
+    if (saveScreenBuilt) {
+        // The band goes back to blank tiles. Nothing on screen depends on it --
+        // the rows this borrowed are ones the title screen never shows -- but a
+        // screen that cleans up after itself is what lets the next visit draw
+        // into the same rows without knowing what the last one left.
+        ClearContext();
+        pNMI = saveScreenCallerNMI;
+    }
 
-    pNMI = callerNMI;
     return saved;
 }
 
