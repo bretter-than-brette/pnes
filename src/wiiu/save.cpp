@@ -102,10 +102,12 @@
  * NO LOGGING, for the reason the other four backends give: log() resolves on
  * this platform to the generic debug branch of logger.hpp, which writes through
  * std::cout, and this backend has no business owning the console that writes to.
- * What actually failed lands in ::lastNative instead; see
- * ::save::LastNativeError. (WHBMountSdCard logs its own failures through
- * WHBLogPrintf, which is a no-op unless the application installed a log
- * backend -- this one does not, so the one call here that could print does not.)
+ * So a failure states itself through save::Response and nowhere else: a
+ * developer who wants the platform's own code breaks on the failing call, where
+ * its return value and errno are both still live. (WHBMountSdCard logs its own
+ * failures through WHBLogPrintf, which is a no-op unless the application
+ * installed a log backend -- this one does not, so the one call here that could
+ * print does not.)
  */
 #include "internal.hpp"
 #include <pnes/save.hpp>
@@ -299,8 +301,7 @@ u64  mountAt    = 0;
 bool mountTried = false;
 constexpr u64 kMountRetryMs = 2000;
 
-save::eError lastErr    = save::found;
-int          lastNative = 0;
+save::eError lastErr = save::found;
 
 /** @brief Whether something has found this game's save since it last looked. */
 bool haveLocation = false;
@@ -332,8 +333,8 @@ constexpr std::size_t RoundUp(const std::size_t n) {
  * client has open, a full journal, a command the volume will not take right now
  * and an invalid parameter -- and NONE of them means what save::busy means in
  * this API, which is "the operation you asked for has not finished". Every
- * operation here finishes. So EBUSY falls through to save::failed, with the
- * errno itself in ::lastNative for whoever needs to know which it was.
+ * operation here finishes. So EBUSY falls through to save::failed, which is the
+ * honest answer: something went wrong that this API has no finer word for.
  *
  * EIO AND EILSEQ ARE save::failed AND NOT save::no_device, which is a real
  * judgement rather than an oversight. FS_ERROR_MEDIA_ERROR (EIO) and
@@ -385,16 +386,14 @@ save::eError MapErrno(const int e) {
 }
 
 /** @brief Records an outcome and returns it, for `return Fail(...)`. */
-save::eError Fail(const save::eError err, const int native) {
-    lastErr    = err;
-    lastNative = native;
+save::eError Fail(const save::eError err) {
+    lastErr = err;
     return err;
 }
 
-/** @brief Records success: save::found, and no platform code to report. */
+/** @brief Records success: save::found. */
 save::eError Won() {
-    lastErr    = save::found;
-    lastNative = 0;
+    lastErr = save::found;
     return save::found;
 }
 
@@ -580,12 +579,12 @@ off_t LengthOf(const char* const path, int& errOut) {
  * O_RDWR with no O_CREAT/O_TRUNC/O_APPEND is wut's "r+", which is what an
  * in-place save actually wants. The file is never read through that handle.
  *
- * THE LENGTH CHECK IS THE GAMECUBE'S, DOWN TO THE CODE IT REPORTS. A prefix
- * longer than the file on the medium is save::full with ENOSPC in
- * ::lastNative -- an errno the filesystem did not produce, which is the point:
- * a developer reading it alongside save::full learns that the FILE was too
- * short rather than the card too full. A game whose save struct has outgrown
- * its existing save file hears the same answer on all five consoles.
+ * THE LENGTH CHECK IS THE GAMECUBE'S. A prefix longer than the file on the
+ * medium is save::full, the same code a card with no room reports, so a game
+ * whose save struct has outgrown its existing save file hears the same answer
+ * on all five consoles. THE TWO CAUSES ARE NOT DISTINGUISHED, deliberately:
+ * "there is not room for this" is true of a short file and a full card alike,
+ * and it is the whole of what a game can act on either way.
  *
  * fsync BEFORE close AND NOT INSTEAD OF IT. A save is the one moment a player
  * may hold the power button or pull the card believing their progress is on it;
@@ -596,28 +595,28 @@ off_t LengthOf(const char* const path, int& errOut) {
  * header comment on /vol/save.
  */
 save::eError Transfer(const void* const src, void* const tar, const std::size_t size) {
-    if (!Mount()) return Fail(save::no_device, ENODEV);
+    if (!Mount()) return Fail(save::no_device);
 
     const int fd = open(kSaveFile, src ? O_RDWR : O_RDONLY);
     if (fd < 0) {
         const int e = errno;
-        return Fail(MapErrno(e), e);
+        return Fail(MapErrno(e));
     }
 
     const off_t len = lseek(fd, 0, SEEK_END);
     if (len < 0) {
         const int e = errno;
         close(fd);
-        return Fail(MapErrno(e), e);
+        return Fail(MapErrno(e));
     }
     if (static_cast<std::size_t>(len) < kAllocUnit || size > static_cast<std::size_t>(len)) {
         close(fd);
-        return Fail(save::full, ENOSPC);
+        return Fail(save::full);
     }
     if (lseek(fd, 0, SEEK_SET) != 0) {
         const int e = errno;
         close(fd);
-        return Fail(MapErrno(e), e);
+        return Fail(MapErrno(e));
     }
 
     const bool ok = src ? (WriteAll(fd, src, size) &&
@@ -627,9 +626,9 @@ save::eError Transfer(const void* const src, void* const tar, const std::size_t 
     const int e = ok ? 0 : errno;
     if (close(fd) != 0 && ok) {
         const int ce = errno;
-        return Fail(MapErrno(ce), ce);
+        return Fail(MapErrno(ce));
     }
-    if (!ok) return Fail(MapErrno(e), e);
+    if (!ok) return Fail(MapErrno(e));
 
     haveLocation = true;
     return Won();
@@ -654,10 +653,10 @@ save::eError SaveOrLoad(const void* const src, void* const tar,
     // that one code, and a portable caller handling it for one console should
     // not meet a different code here for the same mistake. The upper half of
     // that test has no counterpart; see ::kAllocUnit.
-    if (size == 0)    return Fail(save::too_large, EINVAL);
-    if (!src && !tar) return Fail(save::failed, EINVAL);
+    if (size == 0)    return Fail(save::too_large);
+    if (!src && !tar) return Fail(save::failed);
 
-    if (path && ParseDevice(path) == kNoDevice) return Fail(save::bad_path, EINVAL);
+    if (path && ParseDevice(path) == kNoDevice) return Fail(save::bad_path);
 
     return Transfer(src, tar, size);
 }
@@ -693,23 +692,23 @@ save::eError SaveOrLoad(const void* const src, void* const tar,
  * have created is a worse mistake than leaving it.
  */
 save::eError Create(const void* const src, const std::size_t size, const char* const path) {
-    if (size == 0) return Fail(save::too_large, EINVAL);
-    if (!src)      return Fail(save::failed, EINVAL);
+    if (size == 0) return Fail(save::too_large);
+    if (!src)      return Fail(save::failed);
 
-    if (path && ParseDevice(path) == kNoDevice) return Fail(save::bad_path, EINVAL);
-    if (!Mount())                               return Fail(save::no_device, ENODEV);
+    if (path && ParseDevice(path) == kNoDevice) return Fail(save::bad_path);
+    if (!Mount())                               return Fail(save::no_device);
 
     for (const char* const dir : { kHomebrew, kSaveDir }) {
         if (mkdir(dir, 0777) != 0 && errno != EEXIST) {
             const int e = errno;
-            return Fail(MapErrno(e), e);
+            return Fail(MapErrno(e));
         }
     }
 
     const int fd = open(kSaveFile, O_WRONLY | O_CREAT | O_EXCL, 0666);
     if (fd < 0) {
         const int e = errno;
-        return Fail(MapErrno(e), e);
+        return Fail(MapErrno(e));
     }
 
     const bool ok = WriteAll(fd, src, size) &&
@@ -719,11 +718,11 @@ save::eError Create(const void* const src, const std::size_t size, const char* c
     if (close(fd) != 0 && ok) {
         const int ce = errno;
         unlink(kSaveFile);
-        return Fail(MapErrno(ce), ce);
+        return Fail(MapErrno(ce));
     }
     if (!ok) {
         unlink(kSaveFile);
-        return Fail(MapErrno(e), e);
+        return Fail(MapErrno(e));
     }
 
     haveLocation = true;
@@ -785,7 +784,7 @@ Response CreateSave(const void* src, const std::size_t size, const Response* res
 Response GetSaveLocation() {
     if (!Mount()) {
         haveLocation = false;
-        return { .done = true, .err = Fail(no_device, ENODEV), .path = nullptr };
+        return { .done = true, .err = Fail(no_device), .path = nullptr };
     }
 
     int e = 0;
@@ -796,7 +795,7 @@ Response GetSaveLocation() {
     }
 
     haveLocation = false;
-    return { .done = true, .err = Fail(MapErrno(e), e), .path = nullptr };
+    return { .done = true, .err = Fail(MapErrno(e)), .path = nullptr };
 }
 
 /**
@@ -812,16 +811,14 @@ Response GetSaveLocation() {
  * save::no_device AND NOT save::failed, matching the other filesystem backends:
  * the honest content of the answer is that the DEVICE this concept belongs to
  * is not present, which is what src/all/save.cpp says on every target with no
- * card. ::lastNative is ENOSYS so that ::LastNativeError is non-zero -- a
- * developer who called this on the wrong console sees "not implemented" rather
- * than "nothing went wrong".
+ * card.
  */
 Response GetMetaData(void*) {
-    return { .done = true, .err = Fail(no_device, ENOSYS), .path = nullptr };
+    return { .done = true, .err = Fail(no_device), .path = nullptr };
 }
 
 Response SetMetaData(const void*) {
-    return { .done = true, .err = Fail(no_device, ENOSYS), .path = nullptr };
+    return { .done = true, .err = Fail(no_device), .path = nullptr };
 }
 
 /**
@@ -912,32 +909,5 @@ u8 FreeDevices(const std::size_t size) {
     if (size == 0) return 0;
     return AccessibleDevices();
 }
-
-/**
- * @brief The platform's own code for the last thing that went wrong, or 0.
- *
- * AN errno, LIKE THE WII'S, THE SWITCH'S AND THE 3DS'S AND UNLIKE THE
- * GAMECUBE'S NEGATIVE CARD_ERROR_*. Every failure a caller can provoke here
- * comes back through wut's devoptab, which has already translated the FSA
- * server's FSError into errno (__wut_fsa_translate_error), so that is what this
- * reports -- and a developer reads it with <cerrno> rather than with wut's
- * FS_ERROR_* enumeration.
- *
- * WHAT IS NOT REPORTED IS AN FSError. The one call in this file that answers
- * with a bool rather than setting errno (WHBMountSdCard) leaves ENODEV behind
- * instead of the FSError it swallowed, deliberately: save.hpp already says this
- * value is not part of any contract, and mixing two unrelated numbering schemes
- * in one field would make the field useless for the one thing it is for, which
- * is telling a developer what happened. The portable code is still exact -- a
- * mount that fails is save::no_device, which is what it means.
- *
- * THE MOUNT-PATH DISAGREEMENT ::Mount CHECKS FOR IS THE ONE FAILURE WITH NO
- * errno AT ALL: it is this file disagreeing with WHB about where the card went,
- * not a syscall refusing anything, and it surfaces as the save::no_device and
- * ENODEV every other failed mount produces. A developer who sees a save fail on
- * a console with a working card in it should read ::Mount's comment rather than
- * this value.
- */
-i32 LastNativeError() { return static_cast<i32>(lastNative); }
 
 } // namespace save

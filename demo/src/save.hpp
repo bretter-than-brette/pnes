@@ -200,6 +200,9 @@ struct SaveHeader {
 // `config` are already `atomic` (tools/uitk's BssSplit::decl), and `version` is
 // safe only because nothing on NES ever reads it.
 struct SaveFile {
+#if defined(TARGET_NES) || defined(TARGET_GBA) || defined(TARGET_NDS)
+    u8 magicWord;
+#endif
     u16 version;
     SaveHeader header;
 

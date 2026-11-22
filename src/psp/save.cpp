@@ -71,9 +71,9 @@
  * NO LOGGING, for the reason every backend before this one gives: log()
  * resolves on this platform to the generic debug branch of logger.hpp, which
  * writes through std::cout, and this backend has no business owning the console
- * that writes to. What actually failed lands in ::lastNative instead -- see
- * ::save::LastNativeError for the two numbering schemes that field carries on
- * this platform and why it has to carry both.
+ * that writes to. So a failure states itself through save::Response and nowhere
+ * else: a developer who wants the platform's own code breaks on the failing
+ * call, where its return value and errno are both still live.
  */
 #include "internal.hpp"
 #include <pnes/save.hpp>
@@ -281,23 +281,7 @@ bool removable           = false;
 bool resolved   = false;
 bool resolvedOk = false;
 
-save::eError lastErr    = save::found;
-int          lastNative = 0;
-
-/**
- * @brief The kernel's own return value from the last call inside a loop that
- *        reports a bool.
- *
- * ::Native NEEDS THE RETURN VALUE AND THE LOOPS BELOW THROW IT AWAY, which is
- * the one place difference 3 in this file's header comment does not fit in a
- * function signature: ::WriteAll, ::ReadAll and ::Flush answer true or false,
- * and on this platform the failing call's own negative code is half of what
- * went wrong -- the other half, errno, is set only for the 0x8001xxxx family.
- * Dropping it would leave ::save::LastNativeError reporting 0 for exactly the
- * failures it is most needed for, which reads as "nothing went wrong". So the
- * loops leave it here and their callers hand it to ::Native.
- */
-int rawFail = 0;
+save::eError lastErr = save::found;
 
 /** @brief The last finished ::save::FreeDevices answer and what it describes. */
 bool        freeValid = false;
@@ -363,16 +347,14 @@ save::eError MapErrno(const int e) {
 }
 
 /** @brief Records an outcome and returns it, for `return Fail(...)`. */
-save::eError Fail(const save::eError err, const int native) {
-    lastErr    = err;
-    lastNative = native;
+save::eError Fail(const save::eError err) {
+    lastErr = err;
     return err;
 }
 
-/** @brief Records success: save::found, and no platform code to report. */
+/** @brief Records success: save::found. */
 save::eError Won() {
-    lastErr    = save::found;
-    lastNative = 0;
+    lastErr = save::found;
     return save::found;
 }
 
@@ -399,13 +381,14 @@ save::eError Won() {
  * stick ten minutes ago is exactly the bug this guards against.
  *
  * SO THE CONVENTION IS: clear errno, make the call, and on a negative return
- * hand the return value here. A non-zero errno is the POSIX path and maps as
- * usual; a zero errno means the kernel's own code came back in @p ret, which is
- * reported as save::failed with that code kept for ::save::LastNativeError.
+ * come here. A non-zero errno is the POSIX path and maps as usual; a zero errno
+ * means the kernel's own code came back in the return value instead, which this
+ * API has no word finer than save::failed for -- a developer who needs the code
+ * itself breaks on the failing call, which is the only place it exists.
  */
-save::eError Native(const int ret) {
+save::eError Native() {
     const int e = errno;
-    return e ? Fail(MapErrno(e), e) : Fail(save::failed, ret);
+    return e ? Fail(MapErrno(e)) : Fail(save::failed);
 }
 
 /**
@@ -538,7 +521,7 @@ bool WriteAll(const int fd, const void* const src, std::size_t n) {
     const u8* p = static_cast<const u8*>(src);
     while (n) {
         const int w = write(fd, p, n);
-        if (w <= 0) { rawFail = w; return false; }
+        if (w <= 0) return false;
         p += w;
         n -= static_cast<std::size_t>(w);
     }
@@ -550,7 +533,7 @@ bool ReadAll(const int fd, void* const tar, std::size_t n) {
     u8* p = static_cast<u8*>(tar);
     while (n) {
         const int r = read(fd, p, n);
-        if (r <= 0) { rawFail = r; return false; }
+        if (r <= 0) return false;
         p += r;
         n -= static_cast<std::size_t>(r);
     }
@@ -558,17 +541,17 @@ bool ReadAll(const int fd, void* const tar, std::size_t n) {
 }
 
 /**
- * @brief fsync(), recording what it answered.
+ * @brief fsync(), with errno cleared first so a failure is its own.
  *
- * SEPARATE FROM THE && IT SITS IN so that ::rawFail is set for a failing flush
- * the same way it is for a failing write -- a sync that fails outside the POSIX
- * error family is the case where the kernel's code is the only thing there is to
- * report. `>= 0` and not `== 0`, for ::Native's reason.
+ * SEPARATE FROM THE && IT SITS IN for the reason every call in this file clears
+ * errno before it: the value left in errno has to belong to THIS call, and the
+ * writes that ran before it in the same && may have set one. `>= 0` and not
+ * `== 0`, for ::Native's reason.
  */
 bool Flush(const int fd) {
     errno = 0;
     const int r = fsync(fd);
-    if (r < 0) { rawFail = r; return false; }
+    if (r < 0) return false;
     return true;
 }
 
@@ -602,9 +585,9 @@ bool PadTo(const int fd, std::size_t from, const std::size_t to) {
  * @p errOut IS WHAT THE CALLER REPORTS AND IT IS NOT ALWAYS AN errno, which is
  * ::Native's rule carried into a helper that has to return two things: a failed
  * stat leaves the POSIX errno where there was one, and the kernel's own
- * negative code where there was not. Both are the right thing to put in
- * ::lastNative; only the first is the right thing to hand ::MapErrno, which is
- * why callers pass it through ::Native rather than mapping it themselves.
+ * negative code where there was not. Only the first means anything to
+ * ::MapErrno, which is why a caller restores it into errno and goes through
+ * ::Native rather than mapping it itself.
  */
 off_t LengthOf(const char* const path, int& errOut) {
     struct stat st;
@@ -677,12 +660,12 @@ void DirOf(char* const dir) {
  * particular MUST be: a save and a load disagreeing about whether a file is
  * long enough is how a game writes a prefix it can never read back.
  *
- * THE LENGTH CHECK IS THE GAMECUBE'S, DOWN TO THE CODE IT REPORTS. A prefix
- * longer than the file on the medium is save::full with ENOSPC in ::lastNative
- * -- an errno the filesystem did not produce, which is the point: a developer
- * reading it alongside save::full learns that the FILE was too short rather than
- * the stick too full. A game whose save struct has outgrown its existing save
- * file hears the same answer on all six consoles.
+ * THE LENGTH CHECK IS THE GAMECUBE'S. A prefix longer than the file on the
+ * medium is save::full, the same code a stick with no room reports, so a game
+ * whose save struct has outgrown its existing save file hears the same answer
+ * on all six consoles. THE TWO CAUSES ARE NOT DISTINGUISHED, deliberately:
+ * "there is not room for this" is true of a short file and a full stick alike,
+ * and it is the whole of what a game can act on either way.
  *
  * O_WRONLY IS CORRECT HERE, WHICH IS WORTH SAYING ONLY BECAUSE IT IS NOT ON THE
  * WII U: wut's devoptab has no mode for "write, do not truncate, do not create"
@@ -701,48 +684,46 @@ void DirOf(char* const dir) {
  * courtesy call.
  */
 save::eError Transfer(const void* const src, void* const tar, const std::size_t size) {
-    if (!Resolve())  return Fail(save::bad_path, ENAMETOOLONG);
-    if (!Inserted()) return Fail(save::no_device, ENODEV);
+    if (!Resolve())  return Fail(save::bad_path);
+    if (!Inserted()) return Fail(save::no_device);
 
     errno = 0;
     const int fd = open(savePath, src ? O_WRONLY : O_RDONLY);
-    if (fd < 0) return Native(fd);
+    if (fd < 0) return Native();
 
     errno = 0;
     const off_t len = lseek(fd, 0, SEEK_END);
     if (len < 0) {
-        const save::eError err = Native(static_cast<int>(len));
+        const save::eError err = Native();
         close(fd);
         return err;
     }
     if (static_cast<std::size_t>(len) < kAllocUnit || size > static_cast<std::size_t>(len)) {
         close(fd);
-        return Fail(save::full, ENOSPC);
+        return Fail(save::full);
     }
     errno = 0;
     const off_t back = lseek(fd, 0, SEEK_SET);
     if (back != 0) {
-        const save::eError err = Native(static_cast<int>(back));
+        const save::eError err = Native();
         close(fd);
         return err;
     }
 
-    rawFail = 0;
-    errno   = 0;
+    errno = 0;
     const bool ok = src ? (WriteAll(fd, src, size) &&
                            PadTo(fd, size, RoundUp(size)) &&
                            Flush(fd))
                         : ReadAll(fd, tar, size);
-    // BOTH HALVES ARE CAPTURED BEFORE close() RUNS, because close() clobbers
-    // errno on its own account and the failure being reported is the transfer's.
-    const int e   = ok ? 0 : errno;
-    const int raw = ok ? 0 : rawFail;
+    // CAPTURED BEFORE close() RUNS, because close() clobbers errno on its own
+    // account and the failure being reported is the transfer's.
+    const int e = ok ? 0 : errno;
     errno = 0;
     const int closed = close(fd);
-    if (closed < 0 && ok) return Native(closed);
+    if (closed < 0 && ok) return Native();
     if (!ok) {
         errno = e;
-        return Native(raw);
+        return Native();
     }
 
     haveLocation = true;
@@ -768,10 +749,10 @@ save::eError SaveOrLoad(const void* const src, void* const tar,
     // that one code, and a portable caller handling it for one console should
     // not meet a different code here for the same mistake. The upper half of
     // that test has no counterpart; see ::kAllocUnit.
-    if (size == 0)    return Fail(save::too_large, EINVAL);
-    if (!src && !tar) return Fail(save::failed, EINVAL);
+    if (size == 0)    return Fail(save::too_large);
+    if (!src && !tar) return Fail(save::failed);
 
-    if (path && ParseDevice(path) == kNoDevice) return Fail(save::bad_path, EINVAL);
+    if (path && ParseDevice(path) == kNoDevice) return Fail(save::bad_path);
 
     return Transfer(src, tar, size);
 }
@@ -807,15 +788,15 @@ save::eError SaveOrLoad(const void* const src, void* const tar,
  * than leaving it.
  */
 save::eError Create(const void* const src, const std::size_t size, const char* const path) {
-    if (size == 0) return Fail(save::too_large, EINVAL);
-    if (!src)      return Fail(save::failed, EINVAL);
+    if (size == 0) return Fail(save::too_large);
+    if (!src)      return Fail(save::failed);
 
-    if (path && ParseDevice(path) == kNoDevice) return Fail(save::bad_path, EINVAL);
-    if (!Resolve())                             return Fail(save::bad_path, ENAMETOOLONG);
-    if (!Inserted())                            return Fail(save::no_device, ENODEV);
+    if (path && ParseDevice(path) == kNoDevice) return Fail(save::bad_path);
+    if (!Resolve())                             return Fail(save::bad_path);
+    if (!Inserted())                            return Fail(save::no_device);
 
     int e = 0;
-    if (LengthOf(savePath, e) >= 0) return Fail(save::exists, EEXIST);
+    if (LengthOf(savePath, e) >= 0) return Fail(save::exists);
 
     char dir[kPathMax];
     DirOf(dir);
@@ -823,25 +804,23 @@ save::eError Create(const void* const src, const std::size_t size, const char* c
 
     errno = 0;
     const int fd = open(savePath, O_WRONLY | O_CREAT | O_EXCL, 0666);
-    if (fd < 0) return Native(fd);
+    if (fd < 0) return Native();
 
-    rawFail = 0;
-    errno   = 0;
+    errno = 0;
     const bool ok = WriteAll(fd, src, size) &&
                     PadTo(fd, size, RoundUp(size)) &&
                     Flush(fd);
     const int err = ok ? 0 : errno;
-    const int raw = ok ? 0 : rawFail;
     errno = 0;
     const int closed = close(fd);
     if (closed < 0 && ok) {
-        const save::eError code = Native(closed);
+        const save::eError code = Native();
         unlink(savePath);
         return code;
     }
     if (!ok) {
         errno = err;
-        const save::eError code = Native(raw);
+        const save::eError code = Native();
         unlink(savePath);
         return code;
     }
@@ -908,11 +887,11 @@ Response CreateSave(const void* src, const std::size_t size, const Response* res
 Response GetSaveLocation() {
     if (!Resolve()) {
         haveLocation = false;
-        return { .done = true, .err = Fail(bad_path, ENAMETOOLONG), .path = nullptr };
+        return { .done = true, .err = Fail(bad_path), .path = nullptr };
     }
     if (!Inserted()) {
         haveLocation = false;
-        return { .done = true, .err = Fail(no_device, ENODEV), .path = nullptr };
+        return { .done = true, .err = Fail(no_device), .path = nullptr };
     }
 
     int e = 0;
@@ -924,7 +903,7 @@ Response GetSaveLocation() {
 
     haveLocation = false;
     errno = e;
-    return { .done = true, .err = Native(e), .path = nullptr };
+    return { .done = true, .err = Native(), .path = nullptr };
 }
 
 /**
@@ -940,16 +919,14 @@ Response GetSaveLocation() {
  * save::no_device AND NOT save::failed, matching the four backends before this
  * one: the honest content of the answer is that the DEVICE this concept belongs
  * to is not present, which is what src/all/save.cpp says on every target with no
- * card. ::lastNative is ENOSYS so that ::LastNativeError is non-zero -- a
- * developer who called this on the wrong console sees "not implemented" rather
- * than "nothing went wrong".
+ * card.
  */
 Response GetMetaData(void*) {
-    return { .done = true, .err = Fail(no_device, ENOSYS), .path = nullptr };
+    return { .done = true, .err = Fail(no_device), .path = nullptr };
 }
 
 Response SetMetaData(const void*) {
-    return { .done = true, .err = Fail(no_device, ENOSYS), .path = nullptr };
+    return { .done = true, .err = Fail(no_device), .path = nullptr };
 }
 
 /**
@@ -1081,34 +1058,5 @@ u8 FreeDevices(const std::size_t size) {
     freeValid = true;
     return freeMask;
 }
-
-/**
- * @brief The platform's own code for the last thing that went wrong, or 0.
- *
- * TWO NUMBERING SCHEMES IN ONE FIELD, WHICH THE SWITCH'S AND THE 3DS'S
- * COUNTERPARTS BOTH ARGUE AGAINST -- and they are right about their consoles and
- * wrong about this one, which is worth setting out rather than quietly doing.
- * Over there the choice is between an errno that is always set and a service
- * Result that would be redundant with it, so mixing them buys nothing and
- * costs a field that can no longer be read. Here there is no such choice:
- * pspsdk's POSIX layer sets errno for the 0x8001xxxx error family and for
- * nothing else (::Native), so for every other failure the alternatives are the
- * kernel's own code or ZERO -- and zero reads as "nothing went wrong", which is
- * the one thing a developer must not be told about a save that just failed.
- *
- * SO THE SIGN TELLS THEM APART, and nothing is ambiguous: a POSITIVE value is a
- * POSIX errno, to be read with <cerrno> like the Wii's, the Switch's, the 3DS's
- * and the Wii U's; a NEGATIVE value is the raw sce error the kernel returned, to
- * be read in hex (0x80020321 and its neighbours are device-driver errors).
- * There is no overlap to confuse: an errno is small and positive, and every sce
- * error has its top bit set.
- *
- * IT IS STILL NOT PART OF ANY CONTRACT, which is what makes this affordable --
- * save.hpp says so of this value on every target. The PORTABLE code is exact
- * either way: a stick that is not there is save::no_device, a full one is
- * save::full, and a failure this file could not classify is save::failed, which
- * is precisely the case where the number below is the only thing left to go on.
- */
-i32 LastNativeError() { return static_cast<i32>(lastNative); }
 
 } // namespace save

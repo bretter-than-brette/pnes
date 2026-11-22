@@ -31,7 +31,7 @@ save::Response SaveGame(void (* const pump)()) {
         else      video::WaitForPresent();
     }
 
-    log("SaveGame: err=%d native=%d", response.err, save::LastNativeError());
+    log("SaveGame: err=%d", response.err);
     return response;
 }
 #endif

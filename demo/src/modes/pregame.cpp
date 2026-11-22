@@ -192,11 +192,12 @@ void main() {
     }
 
     // Both currencies, once per attempt: the portable code the switch below
-    // acts on, and the CARD_ERROR_* behind it. The library folds four very
-    // different situations into save::no_device -- empty slot, a non-card
-    // device in the slot, a broken directory, a foreign font encoding -- and
-    // this is the only place that difference is visible.
-    log("pregame: GetSaveLocation err=%d native=%d", response.err, save::LastNativeError());
+    // acts on. The library folds four very different situations into
+    // save::no_device -- empty slot, a non-card device in the slot, a broken
+    // directory, a foreign font encoding -- and deliberately does not say
+    // which: a developer who needs to know breaks on the failing call inside
+    // the backend, where the platform's own code is still live.
+    log("pregame: GetSaveLocation err=%d", response.err);
 
     switch (response.err) {
        case save::found: {
@@ -855,8 +856,8 @@ static void ClearContext() {
  * behind it: a player is told what they can act on (no card, a full card, a
  * card with no save on it) and everything else is one "could not save",
  * because nothing a player does differs between a busy card, a denied
- * operation and a bad path. ::save::LastNativeError is where the difference
- * goes -- into the log, for whoever is reading it.
+ * operation and a bad path. The difference goes nowhere: it is not a thing a
+ * player can be told, and not a thing this screen can do anything with.
  */
 static const u8* SaveErrorText(const save::eError err) {
     switch (err) {
@@ -1027,8 +1028,7 @@ bool SaveScreen() {
             break;
         }
 
-        log("pregame::SaveScreen: save failed err=%d native=%d",
-            response.err, save::LastNativeError());
+        log("pregame::SaveScreen: save failed err=%d", response.err);
 
         // THE FAILURE PATH IS THE ONE THAT MUST NOT ASSUME A SCREEN. On a
         // blocking backend the pump never ran, so this is the first thing that
@@ -1105,14 +1105,17 @@ bool LoadSave() {
     // validates perfectly well. `err == found` is the other half: it says the
     // bytes on screen came off the medium rather than out of our own BSS.
     if (response.err != save::found) {
-        log("pregame: load did not complete (err=%d native=%d) -- keeping the defaults "
-            "seeded before it", response.err, save::LastNativeError());
+        log("pregame: load did not complete (err=%d) -- keeping the defaults "
+            "seeded before it", response.err);
     }
 
     return true;
 }
 
 bool ValidateSave() {
+#if defined(TARGET_NES) || defined(TARGET_GBA) || defined(TARGET_NDS)
+    u8 fails = 0;
+#endif
     // run checks on saveData
     if (saveData.version != saveVersion) return false;
     return true;
@@ -1171,8 +1174,8 @@ bool TryCreateSave() {
         // silently put the save on the other card.
         if (response.err != save::found) {
             PrintContext(saveNoDeviceText.data());
-            log("pregame: card %d unusable before create (err=%d native=%d)",
-                static_cast<u8>(useCard2 + 1), response.err, save::LastNativeError());
+            log("pregame: card %d unusable before create (err=%d)",
+                static_cast<u8>(useCard2 + 1), response.err);
             switch (ChoiceWheel(errorOpts, sizeof(errorOpts))) {
                 case Retry:
                     return false; // re attempt
@@ -1191,8 +1194,8 @@ bool TryCreateSave() {
             WaitBody();
         }
 
-        log("pregame: create on %s -> err=%d native=%d",
-            response.path ? response.path : "(no path)", response.err, save::LastNativeError());
+        log("pregame: create on %s -> err=%d",
+            response.path ? response.path : "(no path)", response.err);
 
         switch (response.err) {
             case save::found:

@@ -62,10 +62,9 @@
  * NO LOGGING, UNLIKE MOST OF THIS LIBRARY: log() resolves on this platform to
  * the generic debug branch of logger.hpp, which writes through std::cout and
  * depends on a console that src/ogc/video.cpp's GX framebuffer owns -- no
- * other TU in this backend prints anything. The real CARD_ERROR_* code lands
- * in ::lastNative instead, alongside the portable ::lastErr a caller is told
- * through save::Response -- a game acts on save::no_device, a developer still
- * sees whether it was CARD_ERROR_NOCARD or CARD_ERROR_WRONGDEVICE.
+ * other TU in this backend prints anything. So a failure states itself through
+ * save::Response and nowhere else: a developer who wants the CARD_ERROR_* code
+ * itself breaks on the failing call, which is the only place it exists.
  */
 #include "internal.hpp"
 #include <pnes/save.hpp>
@@ -283,16 +282,16 @@ bool        opened    = false;
 bool        detached  = false;    ///< Set from the detach callback, off-thread.
 
 /**
- * @brief The last outcome, in both currencies.
+ * @brief The last outcome, as the caller is told it.
  *
- * ::lastErr is what a caller is told (save::eError, platform-neutral);
- * ::lastNative is libogc's own code, kept for a debugger and for whatever
- * diagnostic channel this backend eventually grows. Keeping both is the point:
- * a game can act on "no device", and a developer can still see that it was
- * CARD_ERROR_WRONGDEVICE rather than CARD_ERROR_NOCARD.
+ * save::eError AND NOTHING ELSE. This used to sit beside a `lastNative` holding
+ * libogc's own CARD_ERROR_*, published by a `LastNativeError()` no game ever
+ * branched on -- a second error currency maintained by hand at every failure
+ * site, for a value that only ever reached a debug-only log line. The code a
+ * developer wants is live in the failing call's own frame; this is what the API
+ * promises.
  */
-save::eError lastErr    = save::found;
-s32         lastNative = CARD_ERROR_READY;
+save::eError lastErr = save::found;
 
 /** @brief Slots to try, in the order a player expects them tried. */
 constexpr s32 kSlots[2] = { CARD_SLOTA, CARD_SLOTB };
@@ -325,9 +324,8 @@ bool slotFixed = false;
  * Ties go to the EARLIER slot, so slot A's answer is the one a player hears
  * when both cards say the same thing.
  */
-save::eError sweepErr    = save::no_device;
-s32          sweepNative = CARD_ERROR_NOCARD;
-bool         sweepSeen   = false;
+save::eError sweepErr  = save::no_device;
+bool         sweepSeen = false;
 
 /**
  * @brief Ticks spent waiting for one slot's probe to settle before giving up.
@@ -369,14 +367,11 @@ u8 probeRetries = 0;
  * frame keeps the row it had instead of flickering to "checking..." for the
  * length of a save.
  *
- * ::deviceNative is the libogc code behind it, kept for the same reason
- * ::lastNative is -- these deliberately do NOT write ::lastErr / ::lastNative,
- * which belong to the in-flight sequence and would be the one thing a status
- * poll must never disturb.
+ * THESE DELIBERATELY DO NOT WRITE ::lastErr, which belongs to the in-flight
+ * sequence and is the one thing a status poll must never disturb.
  */
-save::eError deviceErr[kDeviceCount]    = { save::no_device, save::no_device };
-s32          deviceNative[kDeviceCount] = { CARD_ERROR_NOCARD, CARD_ERROR_NOCARD };
-bool         deviceKnown[kDeviceCount]  = {};
+save::eError deviceErr[kDeviceCount]   = { save::no_device, save::no_device };
+bool         deviceKnown[kDeviceCount] = {};
 
 /**
  * @brief Slots a mount has found unusable, so the probe-only calls can say so.
@@ -487,8 +482,8 @@ void DetachCallback(s32 chan, s32 /*result*/) {
  * THE WHOLE REASON save::eError EXISTS. CARD_ERROR_NOCARD is -3, which in a u8
  * would reach a game as 253; everything here maps onto a name a game can switch
  * on without knowing what a memory card is. Codes with no portable meaning
- * (CARD_ERROR_IOERROR, _FATAL_ERROR, _CANCELED, _UNLOCKED) land on save::failed,
- * with ::lastNative holding what actually happened.
+ * (CARD_ERROR_IOERROR, _FATAL_ERROR, _CANCELED, _UNLOCKED) land on
+ * save::failed, which is the whole of what a game can act on.
  */
 save::eError MapError(s32 err) {
     switch (err) {
@@ -505,7 +500,7 @@ save::eError MapError(s32 err) {
         // only repair is a format, which destroys other games' saves and
         // belongs to the console's card manager. So they join the empty slot
         // and the SD adapter the game may have booted from: not a device we
-        // can save to. ::lastNative still holds which it was, for a developer.
+        // can save to.
         case CARD_ERROR_BROKEN:
         case CARD_ERROR_ENCODING:    return save::no_device;
         case CARD_ERROR_INSSPACE:
@@ -518,12 +513,11 @@ save::eError MapError(s32 err) {
 }
 
 /** @brief Offers one slot's outcome to the sweep; the best one is kept. */
-void NoteSlotOutcome(const save::eError err, const s32 native) {
+void NoteSlotOutcome(const save::eError err) {
     // Strictly greater, so a tie leaves the EARLIER slot's answer in place.
     if (!sweepSeen || Rank(err) > Rank(sweepErr)) {
-        sweepErr    = err;
-        sweepNative = native;
-        sweepSeen   = true;
+        sweepErr  = err;
+        sweepSeen = true;
     }
 }
 
@@ -543,17 +537,15 @@ void Abort() {
 /**
  * @brief Records an outcome and aborts; always false, for `return Fail(...)`.
  *
- * @param err    What the caller is told.
- * @param native libogc's code, where there was one.
+ * @param err What the caller is told.
  *
  * THE PORTABLE CODE IS PASSED, NOT DERIVED, because this backend fails for
  * reasons libogc has no code for -- a size larger than the medium can hold, a
  * location string that will not parse -- and mapping those through a borrowed
  * CARD_ERROR_* would lose exactly the distinction save::eError exists to make.
  */
-bool Fail(save::eError err, s32 native = CARD_ERROR_FATAL_ERROR) {
-    lastErr    = err;
-    lastNative = native;
+bool Fail(save::eError err) {
+    lastErr = err;
     Abort();
     // TRUE, NOT FALSE: `true` means the sequence is OVER, not that it worked.
     // ::Report pairs it with ::lastErr, so the caller gets `done` with the real
@@ -583,9 +575,8 @@ bool Fail(save::eError err, s32 native = CARD_ERROR_FATAL_ERROR) {
  * the same `true`: the sequence is over either way, and which of the two it was
  * is in ::lastErr, not in this bool. See this file's header comment.
  */
-bool Exhausted(save::eError err, s32 native) {
+bool Exhausted(save::eError err) {
     const bool finding = (op == Op::Finding);
-    lastNative = native;
     // NO LAUNDERING OF THE OUTCOME HERE, unlike an earlier revision: with the
     // vocabulary based on save::found / save::missing, a search of a
     // present-but-blank card reporting save::missing IS the answer the caller
@@ -652,8 +643,8 @@ void RememberLocation(s32 slot, const char* name) {
  * check live here, once, and ::ProbeCurrentSlot adds only what is about the
  * in-flight operation rather than about the card.
  *
- * IT TOUCHES NO SEQUENCE STATE -- not ::lastErr, not ::lastNative, not ::chn or
- * ::sector -- which is what makes it safe to call from a status poll while a
+ * IT TOUCHES NO SEQUENCE STATE -- not ::lastErr, not ::chn, not ::sector --
+ * which is what makes it safe to call from a status poll while a
  * save is in flight. The outcome leaves through @p errOut and the return value
  * instead; the caller decides what to record.
  *
@@ -710,8 +701,8 @@ s32 ProbeMedia(s32 slot, u32& sectorOut, save::eError& errOut) {
         //
         // save::too_large RATHER THAN save::failed, which is what this branch
         // reported while it was only ever reached on the way to a save. The
-        // native code is unchanged, and so is the refusal -- what changed is
-        // that a status query now shows this to a player, and "this card is
+        // refusal is unchanged -- what changed is that a status query now
+        // shows this to a player, and "this card is
         // one this game cannot use" is a sentence a UI can write from
         // ::too_large and cannot write from ::failed. It is the same quantity
         // the check below refuses in the other direction: a size against a
@@ -735,7 +726,7 @@ bool ProbeCurrentSlot() {
     save::eError portable = save::found;
     const s32 err = ProbeMedia(kSlots[slotIndex], sect, portable);
     if (err != CARD_ERROR_READY) {
-        lastErr = portable; lastNative = err;
+        lastErr = portable;
         return false;
     }
     if (op != Op::Finding && static_cast<u32>(pending) > sect) {
@@ -745,7 +736,7 @@ bool ProbeCurrentSlot() {
         // ::Begin's cap is against kSectorMax, which is the widest sector this
         // file is built for; a card with a NARROWER one lands here instead.
         // Refused rather than clipped.
-        lastErr = save::too_large; lastNative = CARD_ERROR_INSSPACE;
+        lastErr = save::too_large;
         return false;
     }
     chn    = kSlots[slotIndex];
@@ -783,8 +774,7 @@ save::eError RefreshDevice(u8 index) {
         deviceBroken[index] = false;
     }
 
-    deviceErr[index]    = (err == CARD_ERROR_READY) ? save::found : portable;
-    deviceNative[index] = err;
+    deviceErr[index] = (err == CARD_ERROR_READY) ? save::found : portable;
 
     // A card a mount has already found unusable is reported as no device, which
     // a probe could never have discovered on its own. See ::deviceBroken.
@@ -997,7 +987,7 @@ bool Begin(Op want, const u8* src, u8* tar, std::size_t size, const char* path) 
 
     if (path) {
         s32 slot = CARD_SLOTA;
-        if (!ParsePath(path, slot, targetName)) return Fail(save::bad_path, CARD_ERROR_NAMETOOLONG);
+        if (!ParsePath(path, slot, targetName)) return Fail(save::bad_path);
         slotIndex = (slot == kSlots[0]) ? 0 : 1;
         slotFixed = true;
     } else if (want != Op::Finding && haveLocation) {
@@ -1038,7 +1028,6 @@ bool Begin(Op want, const u8* src, u8* tar, std::size_t size, const char* path) 
     // waited on. ::sweepErr starts at the weakest answer so the first real one
     // displaces it (::Rank).
     sweepErr     = save::no_device;
-    sweepNative  = CARD_ERROR_NOCARD;
     sweepSeen    = false;
     probeRetries = 0;
 
@@ -1108,7 +1097,7 @@ bool Tick(Op want, const u8* src, u8* tar, std::size_t size, const char* path) {
     // WITHOUT Fail(), which would abort the sequence that legitimately owns
     // the card and leave the caller that owns IT believing it had failed.
     if (op != want)      { return false; }   // see ::Busy, checked before Tick
-    if (detached)        return Fail(save::no_device, CARD_ERROR_NOCARD);
+    if (detached)        return Fail(save::no_device);
     // @p size is read once, on the first tick, so a changed size would describe
     // bytes nothing ever copied.
     if (want != Op::Finding && pending != size) return Fail(save::failed);
@@ -1126,12 +1115,11 @@ bool Tick(Op want, const u8* src, u8* tar, std::size_t size, const char* path) {
                     // another lap: save::busy as a FINISHED outcome would tell
                     // a caller to retry a call that will do this again.
                     lastErr    = save::failed;
-                    lastNative = CARD_ERROR_BUSY;
                 }
                 probeRetries = 0;
-                NoteSlotOutcome(lastErr, lastNative);
+                NoteSlotOutcome(lastErr);
                 if (AdvanceSlot()) return false;      // try the other slot
-                return Exhausted(sweepErr, sweepNative);
+                return Exhausted(sweepErr);
             }
             probeRetries = 0;
             phase = Phase::Mount;
@@ -1144,9 +1132,9 @@ bool Tick(Op want, const u8* src, u8* tar, std::size_t size, const char* path) {
                 // unusable rather than absent. Recorded so the probe-only
                 // device calls stop offering it (::deviceBroken).
                 if (IsUnusableCode(err)) deviceBroken[slotIndex] = true;
-                NoteSlotOutcome(MapError(err), err);
+                NoteSlotOutcome(MapError(err));
                 if (AdvanceSlot()) { phase = Phase::Probe; return false; }
-                return Exhausted(sweepErr, sweepNative);
+                return Exhausted(sweepErr);
             }
             deviceBroken[slotIndex] = false;   // it mounted; whatever it was, it is not that now
             mounted = true;
@@ -1164,14 +1152,13 @@ bool Tick(Op want, const u8* src, u8* tar, std::size_t size, const char* path) {
                 // with no save on it answers CARD_ERROR_NOFILE here, which is
                 // save::missing -- "there is somewhere to save, and your save
                 // is not on it". See ::sweepErr.
-                NoteSlotOutcome(MapError(err), err);
+                NoteSlotOutcome(MapError(err));
                 if (AdvanceSlot()) { phase = Phase::Probe; return false; }
-                return Exhausted(sweepErr, sweepNative);
+                return Exhausted(sweepErr);
             }
             if (op == Op::Finding) {
                 RememberLocation(chn, targetName);
-                lastErr    = save::found;
-                lastNative = CARD_ERROR_READY;
+                lastErr = save::found;
                 Abort();
                 return true;
             }
@@ -1192,7 +1179,7 @@ bool Tick(Op want, const u8* src, u8* tar, std::size_t size, const char* path) {
                 const s32 err = (op == Op::GettingMeta)
                     ? CARD_GetStatus(chn, file.filenum, &metaStat)
                     : CARD_SetStatus(chn, file.filenum, &metaStat);
-                if (err != CARD_ERROR_READY) return Fail(MapError(err), err);
+                if (err != CARD_ERROR_READY) return Fail(MapError(err));
                 // Only a Get copies back: ::metaOut is null for a Set, whose
                 // caller passed a const pointer and is promised no writeback.
                 if (metaOut) std::memcpy(metaOut, &metaStat, sizeof metaStat);
@@ -1210,12 +1197,12 @@ bool Tick(Op want, const u8* src, u8* tar, std::size_t size, const char* path) {
                 // CARD_READSIZE (512), and the prefix is taken out of the
                 // buffer rather than off the card.
                 const s32 err = CARD_Read(&file, staging, sector, 0);
-                if (err != CARD_ERROR_READY) return Fail(MapError(err), err);
+                if (err != CARD_ERROR_READY) return Fail(MapError(err));
                 DCInvalidateRange(staging, sector);
                 std::memcpy(dest, staging, pending);
             } else {
                 const s32 err = CARD_Write(&file, staging, sector, 0);
-                if (err != CARD_ERROR_READY) return Fail(MapError(err), err);
+                if (err != CARD_ERROR_READY) return Fail(MapError(err));
             }
             phase = Phase::Finish;
             return false;
@@ -1238,13 +1225,12 @@ bool Tick(Op want, const u8* src, u8* tar, std::size_t size, const char* path) {
             if (op == Op::Saving || op == Op::Creating) freeMaskValid = false;
             const s32 slot = chn;
             Abort();
-            if (close != CARD_ERROR_READY)   return Fail(MapError(close), close);
-            if (unmount != CARD_ERROR_READY) return Fail(MapError(unmount), unmount);
+            if (close != CARD_ERROR_READY)   return Fail(MapError(close));
+            if (unmount != CARD_ERROR_READY) return Fail(MapError(unmount));
             // A create is also a locate: the game now knows where its save is
             // without searching for the file it just made.
             if (created) RememberLocation(slot, targetName);
-            lastErr    = save::found;
-            lastNative = CARD_ERROR_READY;
+            lastErr = save::found;
             return true;
         }
     }
@@ -1476,21 +1462,6 @@ u8 AccessibleDevices() {
  * and either mismatch starts a fresh sweep rather than returning an answer to a
  * question nobody asked.
  */
-/**
- * @brief ::lastNative, the CARD_ERROR_* behind the last finished operation.
- *
- * The reason this backend keeps two error values at all (see ::lastErr): a game
- * acts on save::no_device, and a developer still needs to see whether that was
- * CARD_ERROR_NOCARD, CARD_ERROR_WRONGDEVICE (an SD adapter in the slot),
- * CARD_ERROR_BROKEN or CARD_ERROR_ENCODING -- four very different situations
- * that this library deliberately reports as one.
- *
- * NOT the device cache's ::deviceNative: that one belongs to a status poll, and
- * a menu asking about slot B every few frames must not be able to overwrite
- * what a failed save left here.
- */
-i32 LastNativeError() { return static_cast<i32>(lastNative); }
-
 u8 FreeDevices(const std::size_t size) {
     // Refused by ::Begin whatever the card says, so no device can take it and
     // there is nothing to go and measure. Reported as a settled 0 rather than
@@ -1615,8 +1586,9 @@ Response GetDeviceStatus(const u8 index) {
  * NO LOGGING, for the reason the GameCube half gives: log() resolves on this
  * platform to the generic debug branch of logger.hpp, which writes through
  * std::cout and depends on a console src/ogc/video.cpp's GX framebuffer owns.
- * The failing call's own errno lands in ::lastNative instead, which is what
- * ::save::LastNativeError reports.
+ * So a failure states itself through save::Response and nowhere else: a
+ * developer who wants the errno breaks on the failing call, which is the only
+ * place it exists.
  */
 
 #include <fat.h>
@@ -1784,8 +1756,7 @@ constexpr u32 kStartupRetryMs   = 2000;
  * game can save, and save.hpp deliberately has no code for "the medium is
  * damaged" because nothing a game can do about it is worth one. An SD card
  * formatted exFAT, a card with no partition table libfat recognises, a card
- * whose FAT is corrupt -- all of them report save::no_device, and
- * ::save::LastNativeError still holds the errno for a developer.
+ * whose FAT is corrupt -- all of them report save::no_device.
  *
  * IT IS CLEARED BY THE MEDIUM LEAVING (::Inserted), which is what makes a
  * reformat recoverable without restarting the game. The limitation is the
@@ -1798,8 +1769,7 @@ bool deviceBroken[kDeviceCount] = { };
 bool haveLocation = false;
 u8   locationDev  = 0;
 
-save::eError lastErr    = save::found;
-int          lastNative = 0;
+save::eError lastErr = save::found;
 
 /** @brief The last finished ::save::FreeDevices answer and what it describes. */
 bool        freeValid  = false;
@@ -1818,7 +1788,7 @@ constexpr std::size_t RoundUp(const std::size_t n) {
  * THE SAME JOB ::MapError DOES FOR libogc's CARD_ERROR_*, with the same
  * reasoning: a game acts on "there is nowhere to save", not on which of
  * newlib's numbers produced that. Anything with no portable meaning lands on
- * save::failed and ::lastNative keeps what actually happened.
+ * save::failed, which is the whole of what a game can act on.
  *
  * ENOENT IS save::missing AND NOT save::bad_path, which is only unambiguous
  * because the path is this file's own: the directory and file names come from
@@ -1859,16 +1829,14 @@ save::eError MapErrno(const int e) {
 }
 
 /** @brief Records an outcome and returns it, for `return Fail(...)`. */
-save::eError Fail(const save::eError err, const int native) {
-    lastErr    = err;
-    lastNative = native;
+save::eError Fail(const save::eError err) {
+    lastErr = err;
     return err;
 }
 
-/** @brief Records success: save::found, and no platform code to report. */
+/** @brief Records success: save::found. */
 save::eError Won() {
-    lastErr    = save::found;
-    lastNative = 0;
+    lastErr = save::found;
     return save::found;
 }
 
@@ -2044,34 +2012,34 @@ off_t LengthOf(const char* const path, int& errOut) {
  * CARD_ERROR_LIMIT, which ::MapError turns into save::full; this refuses a
  * prefix longer than the FAT file with save::full for the same reason -- so a
  * game whose save struct has outgrown its existing save file hears the same
- * answer on both consoles rather than one answer per backend. ::lastNative
- * holds ENOSPC, which is the nearest errno and is NOT one the filesystem
- * produced; a developer reading it alongside save::full learns that the file was
- * too short rather than the card too full.
+ * answer on both consoles rather than one answer per backend. THE TWO CAUSES
+ * ARE NOT DISTINGUISHED, deliberately: "there is not room for this" is true of
+ * a short file and a full card alike, and it is the whole of what a game can
+ * act on either way.
  */
 save::eError Transfer(const u8 d, const void* const src, void* const tar, const std::size_t size) {
-    if (!Mount(d)) return Fail(save::no_device, ENODEV);
+    if (!Mount(d)) return Fail(save::no_device);
 
     const int fd = open(kDevicePath[d], src ? O_WRONLY : O_RDONLY);
     if (fd < 0) {
         const int e = errno;
-        return Fail(MapErrno(e), e);
+        return Fail(MapErrno(e));
     }
 
     const off_t len = lseek(fd, 0, SEEK_END);
     if (len < 0) {
         const int e = errno;
         close(fd);
-        return Fail(MapErrno(e), e);
+        return Fail(MapErrno(e));
     }
     if (static_cast<std::size_t>(len) < kAllocUnit || size > static_cast<std::size_t>(len)) {
         close(fd);
-        return Fail(save::full, ENOSPC);
+        return Fail(save::full);
     }
     if (lseek(fd, 0, SEEK_SET) != 0) {
         const int e = errno;
         close(fd);
-        return Fail(MapErrno(e), e);
+        return Fail(MapErrno(e));
     }
 
     // fsync BEFORE close AND NOT INSTEAD OF IT: a save is the one moment a
@@ -2087,9 +2055,9 @@ save::eError Transfer(const u8 d, const void* const src, void* const tar, const 
     const int e = ok ? 0 : errno;
     if (close(fd) != 0 && ok) {
         const int ce = errno;
-        return Fail(MapErrno(ce), ce);
+        return Fail(MapErrno(ce));
     }
-    if (!ok) return Fail(MapErrno(e), e);
+    if (!ok) return Fail(MapErrno(e));
     return Won();
 }
 
@@ -2112,13 +2080,13 @@ save::eError SaveOrLoad(const void* const src, void* const tar,
     // code, and a portable caller handling it for one console should not meet a
     // different code here for the same mistake. The upper half of that test has
     // no counterpart: see ::kAllocUnit.
-    if (size == 0)   return Fail(save::too_large, EINVAL);
-    if (!src && !tar) return Fail(save::failed, EINVAL);
+    if (size == 0)   return Fail(save::too_large);
+    if (!src && !tar) return Fail(save::failed);
 
     if (path) {
         const u8 d = ParseDevice(path);
-        if (d == kNoDevice) return Fail(save::bad_path, EINVAL);
-        if (!Inserted(d) || deviceBroken[d]) return Fail(save::no_device, ENODEV);
+        if (d == kNoDevice) return Fail(save::bad_path);
+        if (!Inserted(d) || deviceBroken[d]) return Fail(save::no_device);
 
         const save::eError err = Transfer(d, src, tar, size);
         if (err == save::found) {
@@ -2139,9 +2107,8 @@ save::eError SaveOrLoad(const void* const src, void* const tar,
         haveLocation = false;
     }
 
-    save::eError best       = save::no_device;
-    int          bestNative = ENODEV;
-    bool         seen       = false;
+    save::eError best = save::no_device;
+    bool         seen = false;
     for (u8 d = 0; d < kDeviceCount; ++d) {
         if (!Inserted(d) || deviceBroken[d]) continue;
 
@@ -2155,12 +2122,11 @@ save::eError SaveOrLoad(const void* const src, void* const tar,
         // Strictly greater, so a tie leaves the EARLIER device's answer in
         // place -- SD's verdict is the one a player is told about.
         if (!seen || Rank(err) > Rank(best)) {
-            best       = err;
-            bestNative = lastNative;
-            seen       = true;
+            best = err;
+            seen = true;
         }
     }
-    return Fail(best, bestNative);
+    return Fail(best);
 }
 
 /**
@@ -2181,26 +2147,26 @@ save::eError SaveOrLoad(const void* const src, void* const tar,
  * told.
  */
 save::eError Create(const void* const src, const std::size_t size, const char* const path) {
-    if (size == 0) return Fail(save::too_large, EINVAL);
-    if (!src)      return Fail(save::failed, EINVAL);
+    if (size == 0) return Fail(save::too_large);
+    if (!src)      return Fail(save::failed);
 
     u8 d = kDefaultDevice;
     if (path) {
         d = ParseDevice(path);
-        if (d == kNoDevice) return Fail(save::bad_path, EINVAL);
+        if (d == kNoDevice) return Fail(save::bad_path);
     }
-    if (!Inserted(d) || deviceBroken[d]) return Fail(save::no_device, ENODEV);
-    if (!Mount(d))                       return Fail(save::no_device, ENODEV);
+    if (!Inserted(d) || deviceBroken[d]) return Fail(save::no_device);
+    if (!Mount(d))                       return Fail(save::no_device);
 
     if (mkdir(kDeviceDir[d], 0777) != 0 && errno != EEXIST) {
         const int e = errno;
-        return Fail(MapErrno(e), e);
+        return Fail(MapErrno(e));
     }
 
     const int fd = open(kDevicePath[d], O_WRONLY | O_CREAT | O_EXCL, 0666);
     if (fd < 0) {
         const int e = errno;
-        return Fail(MapErrno(e), e);
+        return Fail(MapErrno(e));
     }
 
     const bool ok = WriteAll(fd, src, size) &&
@@ -2210,11 +2176,11 @@ save::eError Create(const void* const src, const std::size_t size, const char* c
     if (close(fd) != 0 && ok) {
         const int ce = errno;
         unlink(kDevicePath[d]);
-        return Fail(MapErrno(ce), ce);
+        return Fail(MapErrno(ce));
     }
     if (!ok) {
         unlink(kDevicePath[d]);
-        return Fail(MapErrno(e), e);
+        return Fail(MapErrno(e));
     }
 
     haveLocation = true;
@@ -2272,17 +2238,15 @@ Response CreateSave(const void* src, const std::size_t size, const Response* res
  * vocabulary.
  */
 Response GetSaveLocation() {
-    eError best       = no_device;
-    int    bestNative = ENODEV;
-    bool   seen       = false;
+    eError best = no_device;
+    bool   seen = false;
 
     for (u8 d = 0; d < kDeviceCount; ++d) {
         if (!Inserted(d) || deviceBroken[d]) continue;
         if (!Mount(d)) {
             if (!seen || Rank(no_device) > Rank(best)) {
-                best       = no_device;
-                bestNative = ENODEV;
-                seen       = true;
+                best = no_device;
+                seen = true;
             }
             continue;
         }
@@ -2297,16 +2261,15 @@ Response GetSaveLocation() {
 
         const eError err = MapErrno(e);
         if (!seen || Rank(err) > Rank(best)) {
-            best       = err;
-            bestNative = e;
-            seen       = true;
+            best = err;
+            seen = true;
         }
     }
 
     // A search that found nothing forgets what it thought it knew: a `path`
     // handed back now would name a file this very call failed to stat.
     haveLocation = false;
-    Fail(best, bestNative);
+    Fail(best);
     return { .done = true, .err = best, .path = nullptr };
 }
 
@@ -2321,16 +2284,14 @@ Response GetSaveLocation() {
  *
  * save::no_device AND NOT save::failed: the honest content of the answer is
  * that the DEVICE this concept belongs to is not present, which is the same
- * thing src/all/save.cpp says on every target with no card. ::lastNative is
- * ENOSYS so that ::LastNativeError is non-zero -- a developer who called this
- * on the wrong console sees "not implemented" rather than "nothing went wrong".
+ * thing src/all/save.cpp says on every target with no card.
  */
 Response GetMetaData(void*) {
-    return { .done = true, .err = Fail(no_device, ENOSYS), .path = nullptr };
+    return { .done = true, .err = Fail(no_device), .path = nullptr };
 }
 
 Response SetMetaData(const void*) {
-    return { .done = true, .err = Fail(no_device, ENOSYS), .path = nullptr };
+    return { .done = true, .err = Fail(no_device), .path = nullptr };
 }
 
 /**
@@ -2434,9 +2395,6 @@ u8 FreeDevices(const std::size_t size) {
     freeValid  = true;
     return mask;
 }
-
-/** @brief The errno the last finished operation left behind, or 0. */
-i32 LastNativeError() { return static_cast<i32>(lastNative); }
 
 } // namespace save
 
