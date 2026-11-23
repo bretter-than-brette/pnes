@@ -8,9 +8,10 @@
  * a 512x256 text BG, and the OAM shadow goes straight into OAM. Pixel 0 is
  * transparent on both, which reproduces NES transparency for free.
  *
- * Driven by emu::GenerateBands, with each band's scroll recorded into a
- * per-scanline table an HBlank interrupt programs line by line -- so the
- * mid-frame raster scroll and the sprite-0 split need no per-pixel CPU work.
+ * Driven by emu::GenerateBands, with each band's scroll and CHR atlas recorded
+ * into per-scanline tables an HBlank interrupt programs line by line -- so the
+ * mid-frame raster scroll, the sprite-0 split and mid-frame CHR bank switches
+ * need no per-pixel CPU work.
  *
  * The 240x160 panel is the first target narrower than the NES as well as
  * shorter, so this is a window onto the unaltered 256x240 world; PPU VRAM stays
@@ -18,9 +19,9 @@
  *
  * Performance: the ARM7TDMI is ~4x slower than the DS's cached ARM9 and runs
  * from wait-stated GamePak ROM, so the per-frame hot path is IWRAM_CODE and the
- * shadows it touches are .bss (which is IWRAM here). The one large cold buffer,
- * the CHR staging area, is pushed to EWRAM so it does not crowd them out. There
- * is no data cache on the ARM7, so no flushes before the DMAs.
+ * shadows it touches are .bss (which is IWRAM here). The large cold buffers,
+ * the CHR atlas staging areas, are pushed to EWRAM so they do not crowd them
+ * out. There is no data cache on the ARM7, so no flushes before the DMAs.
  */
 #include "internal.hpp"
 
@@ -56,6 +57,8 @@ static constexpr int MAP_COLS    = 64;           // 512px / 8
 static constexpr int MAP_ROWS    = 64;           // 2 x (256px / 8)
 static constexpr int CHR_TILES   = 512;          // NES tiles in 8 KB CHR
 static constexpr int GBA_TILE_SZ = 32;           // bytes per 4bpp 8x8 GBA tile
+static constexpr int CHR_WINDOWS = 8;            // 8 KiB of CHR space / 1 KiB
+static constexpr int CHR_SLOTS   = 3;            // atlases resident at once
 
 static constexpr int PRIO_BG         = 2;
 static constexpr int PRIO_SPR_FRONT  = 1;
@@ -78,7 +81,10 @@ constexpr u16 ATTR0_DISABLE = 0x0200;   // affine flag 0 + disable bit -> hidden
 constexpr u16 ATTR1_HFLIP   = 0x1000;
 constexpr u16 ATTR1_VFLIP   = 0x2000;
 
-inline u8*  bg_tiles()  { return reinterpret_cast<u8*>(0x06000000); }
+// Charblock 1 holds the map, so atlases live in 0, 2 and 3.
+constexpr int kSlotBlock[CHR_SLOTS] = {0, 2, 3};
+
+inline u8*  bg_tiles(const int slot) { return reinterpret_cast<u8*>(0x06000000 + kSlotBlock[slot] * 0x4000); }
 inline u16* bg_map()    { return reinterpret_cast<u16*>(0x06004000); }
 inline u8*  obj_tiles() { return reinterpret_cast<u8*>(0x06010000); }
 inline u16* bg_pal()    { return reinterpret_cast<u16*>(0x05000000); }
@@ -88,14 +94,25 @@ inline void* oam_mem()  { return reinterpret_cast<void*>(0x07000000); }
 struct ObjAttr { u16 a0, a1, a2, fill; };
 
 alignas(4) u16 g_map_shadow[MAP_COLS * MAP_ROWS];
-// Cold: used once at init, so it goes to EWRAM rather than crowding the hot
-// code and shadows out of IWRAM.
-EWRAM_BSS alignas(4) u8 g_chr4[CHR_TILES * GBA_TILE_SZ];
-u32 g_chr_built_gen = ~0u;
 alignas(4) ObjAttr g_oam_shadow[128];
 
-u16          sh_h[SCREEN_H], sh_v[SCREEN_H];
-volatile u16 g_h[SCREEN_H],  g_v[SCREEN_H];
+// One atlas per distinct CHR bank state, keyed by where each 1 KiB window
+// resolves. Staged in EWRAM, uploaded only when a slot is rebuilt.
+struct ChrKey { u32 base[CHR_WINDOWS]; };
+
+EWRAM_BSS alignas(4) u8 g_chr4[CHR_SLOTS][CHR_TILES * GBA_TILE_SZ];
+ChrKey g_slot_key[CHR_SLOTS];
+bool   g_slot_valid[CHR_SLOTS];
+bool   g_slot_upload[CHR_SLOTS];
+u32    g_slot_frame[CHR_SLOTS];     // last frame a band used it, for eviction
+u32    g_frame = 1;
+ChrKey g_obj_key;
+bool   g_obj_valid;
+int    g_last_slot;
+u16    g_bgcnt;                     // BG0CNT minus the char base
+
+u16          sh_h[SCREEN_H], sh_v[SCREEN_H], sh_cnt[SCREEN_H];
+volatile u16 g_h[SCREEN_H],  g_v[SCREEN_H],  g_cnt[SCREEN_H];
 
 inline u16 to_bgr555(const u32 argb) {
     const u32 r = (argb >> 16) & 0xFF, g = (argb >> 8) & 0xFF, b = argb & 0xFF;
@@ -115,12 +132,45 @@ void expand_tile(const u8* nes, u8* out) {
     }
 }
 
-IWRAM_CODE void build_chr_atlas() {
+IWRAM_CODE void build_chr_atlas(const int slot) {
     for (int t = 0; t < CHR_TILES; t++) {
         const u32 lma = ppu::ResolveTile(static_cast<u16>(t * 16));
-        expand_tile(CHR_ROM + lma, g_chr4 + t * GBA_TILE_SZ);
+        expand_tile(CHR_ROM + lma, g_chr4[slot] + t * GBA_TILE_SZ);
     }
 }
+
+bool same_key(const ChrKey& a, const ChrKey& b) {
+    for (int w = 0; w < CHR_WINDOWS; w++) if (a.base[w] != b.base[w]) return false;
+    return true;
+}
+
+// The slot holding the current bank state, building one if none does. Evicts
+// the least recently used slot this frame has not claimed.
+IWRAM_CODE int acquire_slot() {
+    ChrKey key;
+    for (int w = 0; w < CHR_WINDOWS; w++) key.base[w] = ppu::ResolveTile(static_cast<u16>(w * 0x400));
+
+    int victim = -1;
+    for (int s = 0; s < CHR_SLOTS; s++) {
+        if (g_slot_valid[s] && same_key(g_slot_key[s], key)) {
+            g_slot_frame[s] = g_frame;
+            return g_last_slot = s;
+        }
+        if (g_slot_frame[s] == g_frame) continue;
+        if (victim < 0 || !g_slot_valid[s]
+            || (g_slot_valid[victim] && g_slot_frame[s] < g_slot_frame[victim])) victim = s;
+    }
+    if (victim < 0) return g_last_slot;   // more bank states than slots this frame
+
+    build_chr_atlas(victim);
+    g_slot_key[victim]    = key;
+    g_slot_valid[victim]  = true;
+    g_slot_upload[victim] = true;
+    g_slot_frame[victim]  = g_frame;
+    return g_last_slot = victim;
+}
+
+inline u16 bgcnt_for(const int slot) { return static_cast<u16>(g_bgcnt | BGCNT_CHARBASE(kSlotBlock[slot])); }
 
 IWRAM_CODE void build_palettes() {
     for (int p = 0; p < 4; p++) {
@@ -193,13 +243,28 @@ IWRAM_CODE void build_sprites() {
     }
 }
 
+// Called with the banks as they stand for this band, so the split IRQ's
+// switch lands on the lines below it.
+// A nametable is 30 rows but its screenblock 32, so world Y is walked per line
+// and mapped onto the plane, skipping each screenblock's last two rows.
 IWRAM_CODE void band_emit(int y0, int y1, u16 xs, u16 ys) {
-    const u16 v = static_cast<u16>(static_cast<int>(ys) - y0);
-    int a = y0 < 0 ? 0 : y0;
-    int b = y1 > SCREEN_H ? SCREEN_H : y1;
+    const u16 cnt = bgcnt_for(acquire_slot());
+    const int a = y0 < 0 ? 0 : y0;
+    const int b = y1 > SCREEN_H ? SCREEN_H : y1;
+    if (a >= b) return;
+
+    const emu::NtGeometry geo = emu::ComputeNtGeometry();
+    const int ntH   = geo.tileH * 8;
+    const int planeMask = (ppu::nametableCount > 2 ? 512 : 256) - 1;
+
+    const int w = (static_cast<int>(ys) + (a - y0)) % geo.worldH;
+    int nt = w / ntH, r = w % ntH;
+
     for (int sy = a; sy < b; sy++) {
         sh_h[sy] = xs;
-        sh_v[sy] = v;
+        sh_v[sy] = static_cast<u16>((nt * 256 + r - sy) & planeMask);
+        sh_cnt[sy] = cnt;
+        if (++r == ntH) { r = 0; if (++nt == geo.gridH) nt = 0; }
     }
 }
 
@@ -213,6 +278,7 @@ IWRAM_CODE void hblank_scroll() {
     if (next < static_cast<unsigned>(SCREEN_H)) {
         REG_BG0HOFS = g_h[next];
         REG_BG0VOFS = g_v[next];
+        REG_BG0CNT  = g_cnt[next];
     }
 }
 
@@ -226,10 +292,12 @@ IWRAM_CODE NI void WaitForPresent() {
     const bool bg  = ppu::PPUMASK & ppu::mask::BG;
     const bool spr = ppu::PPUMASK & ppu::mask::SPRITE;
 
-    const bool chr_dirty = g_chr_built_gen != ppu::chrGeneration;
-    if (chr_dirty) build_chr_atlas();
+    ++g_frame;
+    // Sprites take the banks as the frame starts, before any split moves them.
+    const int top = acquire_slot();
+    const u16 top_cnt = bgcnt_for(top);
 
-    for (int i = 0; i < SCREEN_H; i++) { sh_h[i] = 0; sh_v[i] = 0; }
+    for (int i = 0; i < SCREEN_H; i++) { sh_h[i] = 0; sh_v[i] = 0; sh_cnt[i] = top_cnt; }
 
     if (bg) build_map();
 
@@ -240,10 +308,15 @@ IWRAM_CODE NI void WaitForPresent() {
 
     VBlankIntrWait();
 
-    if (chr_dirty) {
-        dmaCopy(g_chr4, bg_tiles(),  sizeof g_chr4);
-        dmaCopy(g_chr4, obj_tiles(), sizeof g_chr4);
-        g_chr_built_gen = ppu::chrGeneration;
+    for (int s = 0; s < CHR_SLOTS; s++) {
+        if (!g_slot_upload[s]) continue;
+        dmaCopy(g_chr4[s], bg_tiles(s), sizeof g_chr4[s]);
+        g_slot_upload[s] = false;
+    }
+    if (!g_obj_valid || !same_key(g_obj_key, g_slot_key[top])) {
+        dmaCopy(g_chr4[top], obj_tiles(), sizeof g_chr4[top]);
+        g_obj_key   = g_slot_key[top];
+        g_obj_valid = true;
     }
 
     build_palettes();
@@ -257,8 +330,10 @@ IWRAM_CODE NI void WaitForPresent() {
 
     memcpy(const_cast<u16*>(g_h), sh_h, sizeof sh_h);
     memcpy(const_cast<u16*>(g_v), sh_v, sizeof sh_v);
+    memcpy(const_cast<u16*>(g_cnt), sh_cnt, sizeof sh_cnt);
     REG_BG0HOFS = g_h[0];
     REG_BG0VOFS = g_v[0];
+    REG_BG0CNT  = g_cnt[0];
 
     dmaCopy(g_oam_shadow, oam_mem(), sizeof g_oam_shadow);
 
@@ -276,13 +351,16 @@ void irq::init() {
     REG_DISPSTAT |= DSTAT_HBL_IRQ;
     irqEnable(IRQ_HBLANK);
 
-    REG_BG0CNT = static_cast<u16>(PRIO_BG | BGCNT_CHARBASE(0) | BGCNT_MAPBASE(8)
+    g_bgcnt = static_cast<u16>(PRIO_BG | BGCNT_MAPBASE(8)
         | (ppu::nametableCount > 2 ? BGCNT_512x512 : BGCNT_512x256));
 
-    build_chr_atlas();
-    dmaCopy(g_chr4, bg_tiles(),  sizeof g_chr4);
-    dmaCopy(g_chr4, obj_tiles(), sizeof g_chr4);
-    g_chr_built_gen = ppu::chrGeneration;
+    const int s = acquire_slot();
+    dmaCopy(g_chr4[s], bg_tiles(s), sizeof g_chr4[s]);
+    dmaCopy(g_chr4[s], obj_tiles(), sizeof g_chr4[s]);
+    g_slot_upload[s] = false;
+    g_obj_key   = g_slot_key[s];
+    g_obj_valid = true;
+    REG_BG0CNT  = bgcnt_for(s);
 
     for (int s = 0; s < 128; s++) g_oam_shadow[s].a0 = ATTR0_DISABLE;
     dmaCopy(g_oam_shadow, oam_mem(), sizeof g_oam_shadow);

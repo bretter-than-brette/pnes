@@ -381,6 +381,28 @@
       "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
     },
     {
+      "name": "gba-release",
+      "inherits": "_base",
+      "displayName": "Game Boy Advance (Release)",
+      "description": "Game Boy Advance .gba via devkitPro's GBA.cmake (needs gba-dev and DEVKITPRO set). For module testing only: not built by CI or shipped as a demo release.",
+      "cacheVariables": {
+        "TARGET_PLATFORM": "gba",
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_TOOLCHAIN_FILE": "$env{DEVKITPRO}/cmake/GBA.cmake"
+      },
+      "condition": {
+        "type": "notEquals",
+        "lhs": "$env{DEVKITPRO}",
+        "rhs": ""
+      }
+    },
+    {
+      "name": "gba-debug",
+      "inherits": "gba-release",
+      "displayName": "Game Boy Advance (Debug)",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
       "name": "ps2-release",
       "inherits": "_base",
       "displayName": "PlayStation 2 (Release)",
