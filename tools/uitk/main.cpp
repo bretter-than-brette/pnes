@@ -175,7 +175,7 @@ constexpr char kSliderPrefix[] = "[S] ";
 constexpr char kCanvasPrefix[] = "[C] ";
 constexpr char kRectPrefix[] = "[R] ";
 
-const QStringList kTargetNames = {"NES", "GBA", "GCN", "DS",     "DSI", "Wii",
+const QStringList kTargetNames = {"NES", "GBA", "GCN", "DS",     "Wii",
                                    "Wii U", "3DS", "Switch", "PSP",  "PC"};
 
 
@@ -185,7 +185,6 @@ std::optional<std::pair<int, int>> viewportTilesForTarget(const QString& target)
         {"GBA", {30, 20}},    // 240x160 panel
         {"GCN", {40, 30}},    // runtime TV width; 40 = a standard 640x480 NTSC mode
         {"DS", {32, 48}},     // both 256x192 panels stacked: 256x384
-        {"DSI", {32, 48}},    // same two panels as DS
         {"Wii", {40, 30}},    // same runtime-TV path as GCN
         {"Wii U", {52, 30}},  // widescreen, scaled to fill the panel
         {"3DS", {50, 60}},    // 400x240 top over 320x240 bottom: 400x480
@@ -204,7 +203,6 @@ struct PanelTiles {
 std::optional<PanelTiles> panel1TilesForTarget(const QString& target) {
     static const QHash<QString, PanelTiles> kPanels{
         {"DS", {0, 24, 32, 24}},    // 256x192 under a 256x192 top, in a 32x48 viewport
-        {"DSI", {0, 24, 32, 24}},   // same two panels as DS
         {"3DS", {5, 30, 40, 30}},   // 320x240 centred under a 400x240 top, in a 50x60 viewport
     };
     const auto it = kPanels.constFind(target);
@@ -841,7 +839,7 @@ constexpr int kNametableQuadH = 30;
 // Targets whose viewport size is not fixed at compile time -- "gamecube
 // onwards", except PSP, which keeps a fixed letterboxed panel. Everything NOT in
 // this set bakes a SingleChoice's member positions to constants.
-const QSet<QString> kVariadicTargets{"GCN", "DS", "DSI", "Wii", "Wii U", "3DS", "Switch", "PC"};
+const QSet<QString> kVariadicTargets{"GCN", "DS", "Wii", "Wii U", "3DS", "Switch", "PC"};
 
 // The subset whose viewport is genuinely unknown until the game runs:
 // video::viewport_tx() resolves to an extern or a live SDL mode pointer there,

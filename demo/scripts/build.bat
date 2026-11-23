@@ -9,7 +9,7 @@ rem   <target>        nes |
 rem                   linux | linux-x86 | linux-arm64 | linux-docker |
 rem                   win | win-x86 | win-arm64 |
 rem                   mac | mac-x64 |
-rem                   ctr | gc | wii | switch | wiiu | nds | dsi | ps2
+rem                   ctr | gc | wii | switch | wiiu | nds | ps2
 rem   [release|debug] build type (default: release)
 rem
 rem   'win' is an alias for win-x64, 'mac' for mac-arm64, 'linux' is x64.
@@ -28,7 +28,7 @@ setlocal EnableDelayedExpansion
 rem Repo root is two levels up now that the scripts live under demo\scripts\.
 for %%I in ("%~dp0..\..") do set "ROOT=%%~fI"
 
-set "TARGETS= nes linux linux-x86 linux-arm64 linux-docker win-x64 win-x86 win-arm64 mac-arm64 mac-x64 ctr gc wii switch wiiu nds dsi ps2 "
+set "TARGETS= nes linux linux-x86 linux-arm64 linux-docker win-x64 win-x86 win-arm64 mac-arm64 mac-x64 ctr gc wii switch wiiu nds ps2 "
 
 set "PLATFORM="
 set "BUILD_TYPE=release"

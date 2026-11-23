@@ -1,6 +1,6 @@
 /**
  * @file video.cpp
- * @brief Native 2D-hardware presentation backend for DS and DSi (libnds).
+ * @brief Native 2D-hardware presentation backend for DS (libnds).
  *
  * The DS is a 2D tile console whose hardware is a near-cousin of the NES PPU, so
  * this hands the PPU's own primitives to the DS 2D core rather than rasterising:

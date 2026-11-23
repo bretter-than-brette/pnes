@@ -1,5 +1,5 @@
 # Build matrix for pnes: NES ROM, GameCube/Wii .dol, 3DS .3dsx, Switch .nro,
-# DS/DSi .nds, PS2/PS3 .elf, PSP EBOOT, Wii U .wuhb, GBA .gba and the desktop
+# DS .nds, PS2/PS3 .elf, PSP EBOOT, Wii U .wuhb, GBA .gba and the desktop
 # targets.
 #
 # The container jobs are `docker compose run` against the images in docker/, so
@@ -276,35 +276,6 @@ jobs:
         with:
           name: demo-nds
           path: cmake-build-ci-nds-release/demo.nds
-          if-no-files-found: error
-
-  dsi:
-    name: Nintendo DSi (.nds)
-    needs: codegen-check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Download generated UI code
-        uses: actions/download-artifact@v7
-        with:
-          name: demo-gen
-          path: demo/gen
-
-      - name: Cache build tree
-        uses: actions/cache@v5
-        with:
-          path: cmake-build-ci-dsi-release
-          key: dsi-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'docker/Dockerfile.nds') }}
-          restore-keys: dsi-
-
-      - name: Build demo.nds (DSi)
-        run: docker compose run --rm --build build-dsi
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: demo-dsi
-          path: cmake-build-ci-dsi-release/demo.nds
           if-no-files-found: error
 
   wiiu:

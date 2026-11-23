@@ -1,6 +1,6 @@
 /**
  * @file input.cpp
- * @brief Controller polling for the DS and DSi backend (libnds keypad). One
+ * @brief Controller polling for the DS backend (libnds keypad). One
  *        player, with X/Y mirrored onto Start/Select so the larger buttons work.
  *
  * Only the lower panel is a digitizer, so a touch is always on panel 1 and

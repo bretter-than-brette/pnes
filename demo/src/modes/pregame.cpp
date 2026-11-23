@@ -28,6 +28,11 @@
 #include "../../ui/impl/buttons.hpp"
 using namespace br0::intsh;
 
+// Cart targets: the save is always there, so pregame never asks anything.
+#if defined(TARGET_GBA) || defined(TARGET_NDS)
+#  define PREGAME_CART_SAVE
+#endif
+
 namespace pregame {
 
 #ifdef TARGET_NES
@@ -61,8 +66,10 @@ static void WaitBody() {
     video::WaitForPresent();
 }
 
+#ifndef PREGAME_CART_SAVE
 static bool LoadSave();
 static bool TryCreateSave();
+#endif
 static void PrintContext(const u8* infoText);
 static eOptions ChoiceWheel(const eOptions* pOptions, u8 sOptions);
 static void MakeScene();
@@ -91,6 +98,22 @@ constexpr eOptions errorOpts[] = {Retry, Continue};
 constexpr eOptions eraseOpts[] = {Continue, Erase};
 constexpr eOptions cardOpts[]  = { Card1, Card2 };
 
+#ifdef PREGAME_CART_SAVE
+// The NES flow: a bad save is replaced, then written back as the new save.
+void main() {
+    save::Response response = { };
+    while (response = save::Load(&saveData, sizeof(saveData)), !response.done) { }
+
+    if (!ValidateSave()) {
+        saveData = SaveFile{};
+        PopulateSaveData();
+        SaveGame(nullptr);
+    }
+
+    ApplyLoadedConfig();
+    gameMode = eGameModes::Title;
+}
+#else
 void main() {
     log("pregame::main: entered");
     InitPregameScreen();
@@ -254,6 +277,7 @@ void main() {
     log("pregame::main: handing over to the title screen");
     gameMode = eGameModes::Title;
 }
+#endif
 
 void ApplyLoadedConfig() {
 #ifdef TARGET_GC
@@ -518,6 +542,10 @@ void SaveScreenPump() {
 }
 
 bool SaveScreen() {
+#ifdef PREGAME_CART_SAVE
+    // Cart saves are instant and there is nothing to retry, so no screen.
+    return SaveGame(nullptr).err == save::found;
+#endif
     saveScreenBuilt = false;
 
     bool saved = false;
@@ -546,6 +574,7 @@ bool SaveScreen() {
     return saved;
 }
 
+#ifndef PREGAME_CART_SAVE
 bool LoadSave() {
     save::Response response { };
     while (response = save::Load(&saveData, sizeof(saveData), &response), !response.done) {
@@ -553,12 +582,6 @@ bool LoadSave() {
     }
 
     if (!ValidateSave()) {
-#ifdef TARGET_GBA
-        // SRAM is always there, so a bad magic word is a fresh cart, not corruption.
-        saveData = SaveFile{};
-        PopulateSaveData();
-        return true;
-#endif
         PrintContext(saveCorruptText.data());
 
         if (ChoiceWheel(eraseOpts, sizeof(eraseOpts)) == Erase) {
@@ -805,6 +828,7 @@ bool TryCreateSave() {
 
     return true;    //for no retry
 }
+#endif
 
 } // namespace pregame
 

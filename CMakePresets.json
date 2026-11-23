@@ -359,28 +359,6 @@
       "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
     },
     {
-      "name": "dsi-release",
-      "inherits": "_base",
-      "displayName": "Nintendo DSi (Release)",
-      "description": "Nintendo DSi .nds via the devkitARM toolchain -- same libnds 2D-hardware backend as the DS preset, but built with the DSi extensions enabled (TARGET_DSI). The DSi's larger RAM (16 MB vs 4 MB) and faster clock let the build attempt to embed crunched audio; when that does not fit, it falls back to the same user-supplied/stubbed audio path as the DS. Requires devkitPro installed and the DEVKITPRO env var set; the toolchain file (NDS.cmake) pulls in libnds + calico and the nds_create_rom() helper.",
-      "cacheVariables": {
-        "TARGET_PLATFORM": "dsi",
-        "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_TOOLCHAIN_FILE": "$env{DEVKITPRO}/cmake/NDS.cmake"
-      },
-      "condition": {
-        "type": "notEquals",
-        "lhs": "$env{DEVKITPRO}",
-        "rhs": ""
-      }
-    },
-    {
-      "name": "dsi-debug",
-      "inherits": "dsi-release",
-      "displayName": "Nintendo DSi (Debug)",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
-    },
-    {
       "name": "gba-release",
       "inherits": "_base",
       "displayName": "Game Boy Advance (Release)",

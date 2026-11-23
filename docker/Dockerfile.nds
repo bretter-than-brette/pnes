@@ -1,4 +1,4 @@
-# Nintendo DS and DSi build image (devkitARM + libnds).
+# Nintendo DS build image (devkitARM + libnds).
 FROM devkitpro/devkitarm:latest
 
 ENV DEBIAN_FRONTEND=noninteractive

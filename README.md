@@ -24,7 +24,7 @@ Which will demonstrate how you can easily begin using this project.
 >   1. SDL3
 >      1. libusb (linux only)
 > 
-> **3ds/dsi/ds/wiiu/3ds/switch**
+> **3ds/ds/wiiu/switch**
 >   1. devKitPro 
 
 ### 3DS audio: the player needs their console's DSP firmware
@@ -60,7 +60,7 @@ output to stereo, so it is noted here as an option rather than taken.
 - 3ds
 - Wii U
 - Switch
-- DSi/NDS
+- NDS
 - Gamecube
 - GBA*
 - PSP*

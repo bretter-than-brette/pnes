@@ -187,27 +187,6 @@ services:
         cmake --build "cmake-build-ci-$$PRESET" -j"$$(nproc)"
         echo "Built: cmake-build-ci-$$PRESET/demo.nds"
 
-  build-dsi:
-    build:
-      context: docker
-      dockerfile: Dockerfile.nds
-    image: pnes-nds:latest
-    user: "${UID:-0}:${GID:-0}"
-    working_dir: /tmp/pnes
-    volumes:
-      - .:/tmp/pnes
-    environment:
-      PRESET: ${PRESET:-dsi-release}
-      HOME: /tmp
-    command:
-      - bash
-      - -c
-      - |
-        set -euo pipefail
-        cmake --preset "$$PRESET" -B "cmake-build-ci-$$PRESET" -DALTERNATIVE_NAMETABLE=1
-        cmake --build "cmake-build-ci-$$PRESET" -j"$$(nproc)"
-        echo "Built: cmake-build-ci-$$PRESET/demo.nds"
-
   build-ps2:
     build:
       context: docker

@@ -1,12 +1,12 @@
 /**
  * @file audio.cpp
- * @brief Audio stub for DS and DSi: the entry points exist so the library links
+ * @brief Audio stub for DS: the entry points exist so the library links
  *        and the demo runs silent.
  *
  * The DS has 4 MB of main RAM, so there is no room to bake the demo's PCM tracks
  * into the ROM -- per the project's DS plan a user supplies a synthesiser
  * instead. The signatures match the SDL backend exactly, so a real libnds/maxmod
- * mixer later touches only this file. DSi shares the stub for now.
+ * mixer later touches only this file.
  */
 #include <pnes/audio.hpp>
 

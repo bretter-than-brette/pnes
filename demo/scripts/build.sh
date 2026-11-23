@@ -12,7 +12,7 @@ usage() { sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 TARGETS="nes linux linux-x86 linux-arm64 linux-docker \
 win-x64 win-x86 win-arm64 mac-arm64 mac-x64 \
-ctr gc wii switch wiiu nds dsi ps2"
+ctr gc wii switch wiiu nds ps2"
 
 PLATFORM=""
 BUILD_TYPE="release"

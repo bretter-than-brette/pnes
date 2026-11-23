@@ -5,14 +5,14 @@ rem
 rem Presets guard themselves with conditions, so anything unavailable on this
 rem host is simply skipped: the win-* presets only configure on Windows, the
 rem mac-* presets only on Darwin, the devkitPro targets (ctr/gc/wii/switch/
-rem wiiu/nds/dsi) need %DEVKITPRO%, and ps2 needs %PS2DEV%.
+rem wiiu/nds) need %DEVKITPRO%, and ps2 needs %PS2DEV%.
 rem
 rem linux-docker is left out (it is the same build as linux, routed through the
 rem CLion Docker toolchain). PS3, GBA and PSP are not supported by this demo.
 
 setlocal EnableDelayedExpansion
 
-set "TARGETS=nes linux linux-x86 linux-arm64 win-x64 win-x86 win-arm64 mac-arm64 mac-x64 ctr gc wii switch wiiu nds dsi ps2"
+set "TARGETS=nes linux linux-x86 linux-arm64 win-x64 win-x86 win-arm64 mac-arm64 mac-x64 ctr gc wii switch wiiu nds ps2"
 
 set "OK="
 set "FAILED="

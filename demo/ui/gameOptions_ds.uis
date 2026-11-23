@@ -32,7 +32,6 @@
                         "GBA",
                         "GCN",
                         "DS",
-                        "DSI",
                         "Wii",
                         "Wii U",
                         "3DS",
@@ -59,7 +58,6 @@
                         "NES",
                         "GBA",
                         "DS",
-                        "DSI",
                         "3DS"
                     ],
                     "kind": "ctTextBox",
