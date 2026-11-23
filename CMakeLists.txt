@@ -2190,6 +2190,27 @@ else()
     target_link_libraries(pnes PUBLIC SDL3::SDL3-static)
     target_link_libraries(pnes PUBLIC br0::intsh br0::tuple br0::consh)
 
+    set(PC_SAVE_DIR      "super_mary_sisters" CACHE STRING "Desktop save folder under the OS per-user data dir")
+    set(PC_SAVE_FILENAME "save.dat"           CACHE STRING "Desktop save file name inside PC_SAVE_DIR")
+
+    foreach(_pc_knob PC_SAVE_DIR PC_SAVE_FILENAME)
+        string(LENGTH "${${_pc_knob}}" _pc_knob_len)
+        if(_pc_knob_len EQUAL 0 OR _pc_knob_len GREATER 255)
+            message(FATAL_ERROR
+                "${_pc_knob} must be 1-255 characters, got \"${${_pc_knob}}\" (${_pc_knob_len})")
+        endif()
+        # Windows' reserved characters too, since the same name ships there.
+        if("${${_pc_knob}}" MATCHES "[/\\:<>\"|?*]")
+            message(FATAL_ERROR
+                "${_pc_knob} must be a single name with no / \\ : < > \" | ? *, got \"${${_pc_knob}}\" "
+                "-- SDL adds the per-user data folder itself")
+        endif()
+    endforeach()
+
+    target_compile_definitions(pnes PRIVATE
+            "PC_SAVE_DIR=\"${PC_SAVE_DIR}\""
+            "PC_SAVE_FILENAME=\"${PC_SAVE_FILENAME}\"")
+
     FetchContent_Declare(
             stb
             GIT_REPOSITORY https://github.com/nothings/stb.git
