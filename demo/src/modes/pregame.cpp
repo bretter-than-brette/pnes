@@ -553,6 +553,12 @@ bool LoadSave() {
     }
 
     if (!ValidateSave()) {
+#ifdef TARGET_GBA
+        // SRAM is always there, so a bad magic word is a fresh cart, not corruption.
+        saveData = SaveFile{};
+        PopulateSaveData();
+        return true;
+#endif
         PrintContext(saveCorruptText.data());
 
         if (ChoiceWheel(eraseOpts, sizeof(eraseOpts)) == Erase) {

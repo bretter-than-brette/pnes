@@ -43,7 +43,7 @@ void PopulateSaveData() {
     memcpy(saveData.header.gameName,    gameName,   sizeof(gameName));
     memcpy(saveData.header.gameDesc,    gameDesc,   sizeof(gameDesc));
 #endif
-#ifdef TARGET_NES
+#if defined(TARGET_NES) || defined(TARGET_GBA) || defined(TARGET_NDS)
     tech::PopulateFromBuffer(saveData.magicWord, 0, templateMagicWord, 16, 1);
 #endif
 #ifdef TARGET_NES
